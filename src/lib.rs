@@ -66,58 +66,43 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 let (r, _) = diff_with_untracked(dir, &[])?;
                 r
             };
-            let hunks = diff::parse_diff(&raw)?;
-            let selected = resolve_hunks(&hunks, hunk_ids)?;
-
-            let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
-            let patch = diff::reconstruct_patch(&refs);
-            git::apply_cached(dir, &patch, unstage)?;
-
-            let label = if unstage { "Unstaged" } else { "Staged" };
-            let key = if unstage { "unstaged" } else { "staged" };
-            let total = selected.len();
-            let msg = format!("{label} {total} hunk(s)");
-            if cli.json {
-                out.println(&serde_json::json!({ key: total, "message": msg }).to_string());
+            let total = stage_hunks(dir, &raw, hunk_ids, unstage)?;
+            let (label, key) = if unstage {
+                ("Unstaged", "unstaged")
             } else {
-                out.println(&msg);
-            }
+                ("Staged", "staged")
+            };
+            emit_result(
+                &mut out,
+                cli.json,
+                key,
+                total,
+                &format!("{label} {total} hunk(s)"),
+            );
         }
         Command::Commit { message, hunk_ids } => {
             let (raw, _) = diff_with_untracked(dir, &[])?;
-            let hunks = diff::parse_diff(&raw)?;
-            let selected = resolve_hunks(&hunks, hunk_ids)?;
-
-            let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
-            let patch = diff::reconstruct_patch(&refs);
-            git::apply_cached(dir, &patch, false)?;
+            let total = stage_hunks(dir, &raw, hunk_ids, false)?;
             git::commit(dir, message)?;
-
-            let total = selected.len();
-            let msg = format!("Committed {total} hunk(s)");
-            if cli.json {
-                out.println(&serde_json::json!({ "committed": total, "message": msg }).to_string());
-            } else {
-                out.println(&msg);
-            }
+            emit_result(
+                &mut out,
+                cli.json,
+                "committed",
+                total,
+                &format!("Committed {total} hunk(s)"),
+            );
         }
         Command::Amend { message, hunk_ids } => {
             let (raw, _) = diff_with_untracked(dir, &[])?;
-            let hunks = diff::parse_diff(&raw)?;
-            let selected = resolve_hunks(&hunks, hunk_ids)?;
-
-            let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
-            let patch = diff::reconstruct_patch(&refs);
-            git::apply_cached(dir, &patch, false)?;
+            let total = stage_hunks(dir, &raw, hunk_ids, false)?;
             git::commit_amend(dir, message.as_deref())?;
-
-            let total = selected.len();
-            let msg = format!("Amended {total} hunk(s) into HEAD");
-            if cli.json {
-                out.println(&serde_json::json!({ "amended": total, "message": msg }).to_string());
-            } else {
-                out.println(&msg);
-            }
+            emit_result(
+                &mut out,
+                cli.json,
+                "amended",
+                total,
+                &format!("Amended {total} hunk(s) into HEAD"),
+            );
         }
         Command::Status => {
             let branch = git::branch(dir)?;
@@ -129,8 +114,8 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             let (unstaged_raw, _) = diff_with_untracked(dir, &[])?;
             let unstaged = diff::parse_diff(&unstaged_raw)?;
 
-            let (sa, sd) = count_lines(&staged);
-            let (ua, ud) = count_lines(&unstaged);
+            let (sa, sd) = output::count_lines(&staged);
+            let (ua, ud) = output::count_lines(&unstaged);
 
             if cli.json {
                 out.println(
@@ -443,19 +428,22 @@ fn print_hunks(
     Ok(())
 }
 
-fn count_lines(hunks: &[diff::HunkInfo]) -> (usize, usize) {
-    let mut add = 0;
-    let mut del = 0;
-    for h in hunks {
-        for line in h.content.lines() {
-            if line.starts_with('+') {
-                add += 1;
-            } else if line.starts_with('-') {
-                del += 1;
-            }
-        }
+/// Parse diff, resolve hunk IDs, build patch, and apply to index. Returns hunk count.
+fn stage_hunks(dir: &Path, raw: &str, hunk_ids: &[String], reverse: bool) -> Result<usize, String> {
+    let hunks = diff::parse_diff(raw)?;
+    let selected = resolve_hunks(&hunks, hunk_ids)?;
+    let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
+    let patch = diff::reconstruct_patch(&refs);
+    git::apply_cached(dir, &patch, reverse)?;
+    Ok(selected.len())
+}
+
+fn emit_result(out: &mut Output, json: bool, key: &str, count: usize, msg: &str) {
+    if json {
+        out.println(&serde_json::json!({ key: count, "message": msg }).to_string());
+    } else {
+        out.println(msg);
     }
-    (add, del)
 }
 
 /// Split args into (git_args, hunk_id). The hunk ID is the last arg,

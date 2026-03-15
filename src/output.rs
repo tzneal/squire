@@ -8,7 +8,7 @@ pub fn format_log_short(commits: &[CommitInfo]) -> String {
         return buf;
     }
     for c in commits {
-        let (add, del) = commit_line_counts(c);
+        let (add, del) = count_lines(&c.hunks);
         writeln!(
             buf,
             "{}  {}  {} hunk{}  +{}/-{}",
@@ -56,10 +56,10 @@ pub fn format_log_plain(commits: &[CommitInfo]) -> String {
     buf
 }
 
-fn commit_line_counts(c: &CommitInfo) -> (usize, usize) {
+pub fn count_lines(hunks: &[HunkInfo]) -> (usize, usize) {
     let mut add = 0;
     let mut del = 0;
-    for h in &c.hunks {
+    for h in hunks {
         for line in h.content.lines() {
             if line.starts_with('+') {
                 add += 1;
