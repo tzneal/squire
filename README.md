@@ -2,6 +2,8 @@
 
 Non-interactive, hunk-addressable git staging CLI for LLMs.
 
+![Splitting a commit with squire](doc/demo-split.gif)
+
 `git add -p` is an interactive TUI that LLMs can't drive. squire
 exposes the same hunk-level staging through single commands with
 structured arguments, so an LLM (or script) can selectively stage,
