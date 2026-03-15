@@ -9,7 +9,7 @@ impl TestRepo {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let repo = Self { dir };
-        repo.git(&["init"]);
+        repo.git(&["init", "-b", "main"]);
         repo.git(&["config", "user.email", "test@test.com"]);
         repo.git(&["config", "user.name", "Test"]);
         repo
