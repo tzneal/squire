@@ -1021,6 +1021,37 @@ fn stage_untracked_file_no_trailing_newline() {
         "staged content should not have trailing newline"
     );
 }
+
+#[test]
+fn show_with_line_selector() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "ctx1\nold1\nctx2\nold2\nctx3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "ctx1\nnew1\nctx2\nnew2\nctx3\n");
+
+    // Get hunk with line hashes
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let line_hashes: Vec<&str> = hunks[0]["line_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    // Show only the first change using line selector
+    let selector = format!("{}:{},{}", id, line_hashes[1], line_hashes[2]);
+    let out = repo.squire(&["--json", "show", &selector]);
+    let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let arr = shown.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0]["content"].as_str().unwrap().contains("-old1"));
+    assert!(arr[0]["content"].as_str().unwrap().contains("+new1"));
+    assert!(!arr[0]["content"].as_str().unwrap().contains("-old2"));
+    assert!(!arr[0]["content"].as_str().unwrap().contains("+new2"));
+}
+
 #[test]
 fn cleanup_merged_branch_detected() {
     let repo = TestRepo::new();

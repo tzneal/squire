@@ -39,14 +39,29 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
         }
         Command::Show { args } => {
             let (json, short, filtered) = extract_format_flags(cli, args);
-            let (git_args, hunk_id) = split_last_arg(&filtered, "show requires a hunk ID")?;
+            let (git_args, hunk_arg) = split_last_arg(&filtered, "show requires a hunk ID")?;
+            let (hunk_id, selector) = match hunk_arg.split_once(':') {
+                Some((id, sel)) => (id, Some(sel)),
+                None => (hunk_arg, None),
+            };
+            let resolve_show = |hunk: &diff::HunkInfo| -> Result<diff::HunkInfo, String> {
+                match selector {
+                    Some(sel) => {
+                        let line_hashes = resolve_selector(hunk, sel)?;
+                        let refs: Vec<&str> = line_hashes.iter().map(|s| s.as_str()).collect();
+                        diff::select_lines(hunk, &refs)
+                    }
+                    None => Ok(hunk.clone()),
+                }
+            };
             if !git_args.is_empty() {
                 let mut show_args = vec!["--format=".to_string()];
                 show_args.extend_from_slice(git_args);
                 let raw = git::show(dir, &show_args)?;
                 let hunks = diff::parse_diff(&raw)?;
                 if let Ok(hunk) = find_hunk(&hunks, hunk_id) {
-                    print_hunks(&mut out, json, short, std::slice::from_ref(hunk))?;
+                    let resolved = resolve_show(hunk)?;
+                    print_hunks(&mut out, json, short, std::slice::from_ref(&resolved))?;
                     return Ok(out);
                 }
             }
@@ -56,7 +71,8 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             let unstaged_hunks = diff::parse_diff(&unstaged_raw)?;
             let hunk = find_hunk(&cached_hunks, hunk_id)
                 .or_else(|_| find_hunk(&unstaged_hunks, hunk_id))?;
-            print_hunks(&mut out, json, short, std::slice::from_ref(hunk))?;
+            let resolved = resolve_show(hunk)?;
+            print_hunks(&mut out, json, short, std::slice::from_ref(&resolved))?;
         }
         Command::Stage { hunk_ids } | Command::Unstage { hunk_ids } => {
             let unstage = matches!(command, Command::Unstage { .. });
@@ -447,7 +463,7 @@ fn emit_result(out: &mut Output, json: bool, key: &str, count: usize, msg: &str)
 }
 
 /// Split args into (git_args, hunk_id). The hunk ID is the last arg,
-/// validated as a hex string.
+/// validated as a hex string (optionally with a `:selector` suffix).
 fn split_last_arg<'a>(
     args: &'a [String],
     err_msg: &str,
@@ -457,7 +473,8 @@ fn split_last_arg<'a>(
     }
     let (git_args, last) = args.split_at(args.len() - 1);
     let id = &last[0];
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+    let hex_part = id.split(':').next().unwrap_or(id);
+    if hex_part.is_empty() || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!(
             "'{id}' is not a valid hunk ID (expected hex string)"
         ));
