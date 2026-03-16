@@ -619,7 +619,13 @@ mod tests {
         let refs = vec![&h1, &h2];
         let patch = reconstruct_patch(&refs);
         // Both old_file paths must appear in the patch
-        assert!(patch.contains("--- a/old_a.txt"), "missing old_a.txt in:\n{patch}");
-        assert!(patch.contains("--- a/old_b.txt"), "missing old_b.txt in:\n{patch}");
+        assert!(
+            patch.contains("--- a/old_a.txt"),
+            "missing old_a.txt in:\n{patch}"
+        );
+        assert!(
+            patch.contains("--- a/old_b.txt"),
+            "missing old_b.txt in:\n{patch}"
+        );
     }
 }
