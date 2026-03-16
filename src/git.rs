@@ -16,6 +16,17 @@ fn git_cmd(dir: &Path, subcmd: &str, args: &[String]) -> Result<String, String> 
     String::from_utf8(output.stdout).map_err(|e| format!("invalid utf-8 from git: {e}"))
 }
 
+/// Check if a string resolves to a git ref.
+pub fn is_ref(dir: &Path, s: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", s])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|st| st.success())
+}
+
 pub fn diff(dir: &Path, args: &[String]) -> Result<String, String> {
     git_cmd(dir, "diff", args)
 }

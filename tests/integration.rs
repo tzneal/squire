@@ -996,6 +996,24 @@ fn log_n_limits_output() {
 // --- cleanup command ---
 
 #[test]
+fn diff_path_without_separator_includes_untracked() {
+    let repo = TestRepo::new();
+    repo.write_file("tracked.txt", "content\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    // Create an untracked file and diff with a bare path (no --)
+    repo.write_file("untracked.txt", "new\n");
+
+    let output = repo.squire(&["--json", "diff", "untracked.txt"]);
+    let hunks: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let arr = hunks.as_array().unwrap();
+
+    // The untracked file should appear even without -- separator
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0]["file"].as_str().unwrap().contains("untracked.txt"));
+}
+
+#[test]
 fn stage_untracked_file_no_trailing_newline() {
     let repo = TestRepo::new();
     repo.write_file("tracked.txt", "content\n");

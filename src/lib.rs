@@ -411,9 +411,9 @@ fn diff_with_untracked(dir: &Path, args: &[String]) -> Result<(String, Vec<Strin
     let mut binary_files = Vec::new();
     // Only include untracked files for plain working-tree diffs (no refs, no --cached).
     let args_before_sep: Vec<&String> = args.iter().take_while(|a| *a != "--").collect();
-    let has_refs_or_cached = args_before_sep
-        .iter()
-        .any(|a| !a.starts_with('-') || *a == "--cached" || *a == "--staged");
+    let has_refs_or_cached = args_before_sep.iter().any(|a| {
+        *a == "--cached" || *a == "--staged" || (!a.starts_with('-') && git::is_ref(dir, a))
+    });
     if !has_refs_or_cached {
         let files = git::list_untracked(dir)?;
         if !files.is_empty() {
