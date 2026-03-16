@@ -143,6 +143,7 @@ mod tests {
             header: Some("fn main()".to_string()),
             content: "-old\n+new\n context\n".to_string(),
             line_hashes: vec!["aa".to_string(), "bb".to_string(), "cc".to_string()],
+            no_newline: false,
         }
     }
 

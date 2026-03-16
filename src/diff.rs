@@ -22,6 +22,9 @@ pub struct HunkInfo {
     pub header: Option<String>,
     /// Short unique hash for each content line
     pub line_hashes: Vec<String>,
+    /// True if this hunk ends without a trailing newline in the file
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_newline: bool,
 }
 
 /// Parse a unified diff string into a list of HunkInfos with content-hash IDs.
@@ -35,7 +38,8 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
     for patch in &patches {
         let file = strip_diff_prefix(&patch.new.path);
         let old_file = strip_diff_prefix(&patch.old.path);
-        for hunk in &patch.hunks {
+        let hunk_count = patch.hunks.len();
+        for (hi, hunk) in patch.hunks.iter().enumerate() {
             let content = hunk_content_string(&hunk.lines);
             let old_range = format!("{},{}", hunk.old_range.start, hunk.old_range.count);
             let id = hunk_id(&file, &old_range, &content);
@@ -50,6 +54,7 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
                 content,
                 header: hunk.hint().map(String::from),
                 line_hashes,
+                no_newline: !patch.end_newline && hi == hunk_count - 1,
             });
         }
     }
@@ -72,27 +77,30 @@ fn strip_diff_prefix(path: &str) -> String {
 pub fn reconstruct_patch(hunks: &[&HunkInfo]) -> String {
     let mut sorted: Vec<&HunkInfo> = hunks.to_vec();
     sorted.sort_by(|a, b| {
-        a.file.cmp(&b.file).then_with(|| {
-            let a_start = a
-                .old_range
-                .split(',')
-                .next()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let b_start = b
-                .old_range
-                .split(',')
-                .next()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            a_start.cmp(&b_start)
-        })
+        (&a.old_file, &a.file)
+            .cmp(&(&b.old_file, &b.file))
+            .then_with(|| {
+                let a_start = a
+                    .old_range
+                    .split(',')
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let b_start = b
+                    .old_range
+                    .split(',')
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                a_start.cmp(&b_start)
+            })
     });
     let mut patch = String::new();
-    let mut current_file = "";
+    let mut current_key: (&str, &str) = ("", "");
     for hunk in &sorted {
-        if hunk.file != current_file {
-            current_file = &hunk.file;
+        let key = (hunk.old_file.as_str(), hunk.file.as_str());
+        if key != current_key {
+            current_key = key;
             let old_path = if hunk.old_file == "/dev/null" {
                 "/dev/null".to_string()
             } else {
@@ -115,6 +123,9 @@ pub fn reconstruct_patch(hunks: &[&HunkInfo]) -> String {
                 .unwrap_or_default()
         ));
         patch.push_str(&hunk.content);
+        if hunk.no_newline {
+            patch.push_str("\\ No newline at end of file\n");
+        }
     }
     patch
 }
@@ -206,8 +217,14 @@ pub fn generate_untracked_diff(
             writeln!(out, "@@ -0,0 +0,0 @@").unwrap();
         } else {
             writeln!(out, "@@ -0,0 +1,{count} @@").unwrap();
-            for line in &lines {
-                writeln!(out, "+{line}").unwrap();
+            for (i, line) in lines.iter().enumerate() {
+                if i == count - 1 && !text.ends_with('\n') {
+                    // Last line without trailing newline — omit the writeln newline
+                    // and append the no-newline marker
+                    write!(out, "+{line}\n\\ No newline at end of file\n").unwrap();
+                } else {
+                    writeln!(out, "+{line}").unwrap();
+                }
             }
         }
     }
@@ -328,6 +345,7 @@ pub fn select_lines(hunk: &HunkInfo, selected_hashes: &[&str]) -> Result<HunkInf
         content,
         header: hunk.header.clone(),
         line_hashes,
+        no_newline: hunk.no_newline,
     })
 }
 
@@ -571,5 +589,37 @@ mod tests {
         let hunks = parse_diff(HEADER_DIFF).unwrap();
         let json = serde_json::to_string(&hunks[0]).unwrap();
         assert!(json.contains("\"header\":\"fn example()\""));
+    }
+
+    #[test]
+    fn reconstruct_patch_different_old_files_same_new_file() {
+        // Two hunks with different old_file but same file (e.g. two renames to same target)
+        let h1 = HunkInfo {
+            id: "aaaa1111".to_string(),
+            file: "target.txt".to_string(),
+            old_file: "old_a.txt".to_string(),
+            old_range: "1,1".to_string(),
+            new_range: "1,1".to_string(),
+            content: "-a\n+b\n".to_string(),
+            header: None,
+            line_hashes: vec!["aa".to_string(), "bb".to_string()],
+            no_newline: false,
+        };
+        let h2 = HunkInfo {
+            id: "bbbb2222".to_string(),
+            file: "target.txt".to_string(),
+            old_file: "old_b.txt".to_string(),
+            old_range: "1,1".to_string(),
+            new_range: "1,1".to_string(),
+            content: "-c\n+d\n".to_string(),
+            header: None,
+            line_hashes: vec!["cc".to_string(), "dd".to_string()],
+            no_newline: false,
+        };
+        let refs = vec![&h1, &h2];
+        let patch = reconstruct_patch(&refs);
+        // Both old_file paths must appear in the patch
+        assert!(patch.contains("--- a/old_a.txt"), "missing old_a.txt in:\n{patch}");
+        assert!(patch.contains("--- a/old_b.txt"), "missing old_b.txt in:\n{patch}");
     }
 }

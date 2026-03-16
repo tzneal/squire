@@ -996,6 +996,32 @@ fn log_n_limits_output() {
 // --- cleanup command ---
 
 #[test]
+fn stage_untracked_file_no_trailing_newline() {
+    let repo = TestRepo::new();
+    repo.write_file("tracked.txt", "content\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    // File without trailing newline
+    repo.write_file("no_newline.txt", "hello");
+
+    let hunks = repo.diff_json();
+    let arr = hunks.as_array().unwrap();
+    let hunk = arr
+        .iter()
+        .find(|h| h["file"].as_str().unwrap().contains("no_newline.txt"))
+        .expect("untracked file should appear in diff");
+    let id = hunk["id"].as_str().unwrap();
+
+    repo.squire(&["stage", id]);
+
+    // The staged blob must match the file exactly (no spurious trailing newline)
+    let staged_bytes = repo.git(&["show", ":no_newline.txt"]);
+    assert_eq!(
+        staged_bytes, "hello",
+        "staged content should not have trailing newline"
+    );
+}
+#[test]
 fn cleanup_merged_branch_detected() {
     let repo = TestRepo::new();
     repo.write_file("f.txt", "v1\n");
