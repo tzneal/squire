@@ -592,6 +592,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_log_with_leading_garbage_lines() {
+        // Simulate git outputting unexpected lines before the first commit header
+        let raw = "some warning line\n\
+                   abc123\0Author\02026-01-01T00:00:00Z\0first commit\n\
+                   --- a/f.txt\n\
+                   +++ b/f.txt\n\
+                   @@ -1,1 +1,1 @@\n\
+                   -old\n\
+                   +new\n";
+        let commits = parse_log(raw).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].message, "first commit");
+        assert_eq!(commits[0].hunks.len(), 1);
+    }
+
+    #[test]
     fn reconstruct_patch_different_old_files_same_new_file() {
         // Two hunks with different old_file but same file (e.g. two renames to same target)
         let h1 = HunkInfo {
