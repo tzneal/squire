@@ -32,13 +32,39 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
     if diff_text.trim().is_empty() {
         return Ok(Vec::new());
     }
+    // Strip `\ No newline at end of file` markers before parsing — the
+    // `patch` crate panics when this marker appears mid-hunk (e.g. between
+    // a `-` and `+` line when a file gains a trailing newline).  We detect
+    // when the marker follows a `+` line (new side lacks trailing newline)
+    // so we can restore the `no_newline` flag per file.
+    let mut cleaned = String::with_capacity(diff_text.len());
+    let mut no_nl_new_side: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut current_file = String::new();
+    let mut prev_was_add = false;
+    for line in diff_text.lines() {
+        if line.starts_with("+++ ") {
+            current_file = strip_diff_prefix(line.trim_start_matches("+++ "));
+            prev_was_add = false;
+        }
+        if line.starts_with("\\ No newline at end of file") {
+            if prev_was_add {
+                no_nl_new_side.insert(current_file.clone());
+            }
+            continue;
+        }
+        prev_was_add = line.starts_with('+') && !line.starts_with("+++ ");
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+
     let patches =
-        Patch::from_multiple(diff_text).map_err(|e| format!("failed to parse diff: {e}"))?;
+        Patch::from_multiple(&cleaned).map_err(|e| format!("failed to parse diff: {e}"))?;
     let mut hunks = Vec::new();
     for patch in &patches {
         let file = strip_diff_prefix(&patch.new.path);
         let old_file = strip_diff_prefix(&patch.old.path);
         let hunk_count = patch.hunks.len();
+        let file_no_nl = no_nl_new_side.contains(&file);
         for (hi, hunk) in patch.hunks.iter().enumerate() {
             let content = hunk_content_string(&hunk.lines);
             let old_range = format!("{},{}", hunk.old_range.start, hunk.old_range.count);
@@ -54,7 +80,7 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
                 content,
                 header: hunk.hint().map(String::from),
                 line_hashes,
-                no_newline: !patch.end_newline && hi == hunk_count - 1,
+                no_newline: file_no_nl && hi == hunk_count - 1,
             });
         }
     }
@@ -605,6 +631,27 @@ mod tests {
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].message, "first commit");
         assert_eq!(commits[0].hunks.len(), 1);
+    }
+
+    #[test]
+    fn no_newline_mid_diff_does_not_panic() {
+        // Old side had no trailing newline, new side adds one. The
+        // `\ No newline at end of file` marker sits between the `-` and `+`
+        // lines of the same hunk.
+        let diff = "\
+diff --git a/a.json b/a.json
+index aaa..bbb 100644
+--- a/a.json
++++ b/a.json
+@@ -1,2 +1,2 @@
+ [
+-}
+\\ No newline at end of file
++}
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, "a.json");
     }
 
     #[test]
