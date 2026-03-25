@@ -175,6 +175,27 @@ pub fn commit_amend(dir: &Path, message: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Create a fixup commit targeting `target_sha` and autosquash-rebase it in.
+pub fn rebase_autosquash(dir: &Path, target_sha: &str) -> Result<(), String> {
+    let parent = format!("{target_sha}~1");
+    git_cmd(
+        dir,
+        "commit",
+        &["--fixup".to_string(), target_sha.to_string()],
+    )?;
+    let output = Command::new("git")
+        .args(["rebase", "-i", "--autosquash", &parent])
+        .current_dir(dir)
+        .env("GIT_SEQUENCE_EDITOR", "true")
+        .output()
+        .map_err(|e| format!("failed to run git rebase: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git rebase --autosquash failed: {stderr}"));
+    }
+    Ok(())
+}
+
 /// Non-interactive rebase that marks `commit` as "edit" and stops there,
 /// then does a mixed reset so changes are unstaged.
 pub fn rebase_edit_and_reset(dir: &Path, commit: &str) -> Result<(), String> {

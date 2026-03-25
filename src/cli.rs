@@ -108,11 +108,14 @@ COMMANDS
       squire commit -m \"feat: parser\" abc12345
       squire commit -m \"fix: typo\" abc12345:f3,a1 def67890
 
-  squire amend [-m <message>] <hunk-id>[:<line-selector>]...
-    Stage hunks and amend the current commit. If -m is given,
-    replaces the commit message; otherwise keeps it.
-      squire amend abc12345              # amend, keep message
-      squire amend -m \"new msg\" abc12345 # amend with new message
+  squire amend [--commit <ref>] [-m <message>] <hunk-id>[:<line-selector>]...
+    Stage hunks and amend into a commit. Defaults to HEAD.
+    Use --commit to target an older commit (creates a fixup commit
+    and autosquash rebases). -m replaces the message (HEAD only).
+      squire amend abc12345              # amend HEAD, keep message
+      squire amend -m \"new msg\" abc12345 # amend HEAD with new message
+      squire amend --commit HEAD~2 abc12345  # amend older commit
+      squire amend --commit HEAD~2 abc12345   # amend older commit
 
   squire split <commit>
     Prepare to split a commit. Requires a clean working tree.
@@ -355,19 +358,26 @@ pub enum Command {
         hunk_ids: Vec<String>,
     },
 
-    /// Stage hunks and amend the current commit
+    /// Stage hunks and amend into an existing commit
     ///
-    /// Stages the specified hunks, then amends HEAD.
+    /// Stages the specified hunks, then amends the target commit.
+    /// Defaults to HEAD. Use --commit to target an older commit
+    /// (creates a fixup commit and autosquash rebases).
     /// If -m is given, replaces the commit message; otherwise keeps it.
     ///
     /// Examples:
-    ///   squire amend abc12345              # amend, keep message
-    ///   squire amend -m "new msg" abc12345 # amend with new message
+    ///   squire amend abc12345                      # amend HEAD
+    ///   squire amend -m "new msg" abc12345          # amend HEAD, new message
+    ///   squire amend --commit HEAD~2 abc12345       # amend older commit
+    ///   squire amend --commit HEAD~2 abc12345       # amend older commit
     #[command(verbatim_doc_comment)]
     Amend {
         /// Optional replacement commit message
         #[arg(short, long)]
         message: Option<String>,
+        /// Target commit to amend into (default: HEAD)
+        #[arg(short, long)]
+        commit: Option<String>,
         /// One or more hunk IDs to stage and amend into HEAD
         #[arg(required = true)]
         hunk_ids: Vec<String>,

@@ -108,10 +108,32 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 &format!("Committed {total} hunk(s)"),
             );
         }
-        Command::Amend { message, hunk_ids } => {
+        Command::Amend {
+            message,
+            commit,
+            hunk_ids,
+        } => {
             let (raw, _) = diff_with_untracked(dir, &[])?;
             let total = stage_hunks(dir, &raw, hunk_ids, false)?;
-            git::commit_amend(dir, message.as_deref())?;
+            match commit {
+                Some(rev) => {
+                    let target = git::rev_parse(dir, rev)?;
+                    let head = git::rev_parse(dir, "HEAD")?;
+                    if target == head {
+                        git::commit_amend(dir, message.as_deref())?;
+                    } else {
+                        if message.is_some() {
+                            return Err(
+                                "-m cannot be used with --commit for non-HEAD targets".to_string()
+                            );
+                        }
+                        git::rebase_autosquash(dir, &target)?;
+                    }
+                }
+                None => {
+                    git::commit_amend(dir, message.as_deref())?;
+                }
+            }
             emit_result(
                 &mut out,
                 cli.json,
