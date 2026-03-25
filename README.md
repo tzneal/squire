@@ -63,6 +63,19 @@ squire stage abc12345:f3-7b          # stage a range of lines
 squire unstage abc12345              # unstage specific hunks
 ```
 
+### Commit and amend
+
+```bash
+squire commit -m "feat: parser" abc12345       # stage + commit in one step
+squire amend abc12345                          # amend into HEAD
+squire amend -m "new msg" abc12345             # amend HEAD with new message
+squire amend --commit HEAD~2 abc12345          # amend into an older commit
+```
+
+When `--commit` targets a non-HEAD commit, squire creates a fixup
+commit and runs an autosquash rebase to fold it in. The `-m` flag
+is only supported when amending HEAD.
+
 ### Check status
 
 ```bash

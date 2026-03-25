@@ -793,6 +793,78 @@ fn amend_json_output() {
     assert_eq!(result["amended"].as_u64().unwrap(), 1);
 }
 
+#[test]
+fn amend_into_older_commit() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write_file("c.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    // Create an unstaged change to amend into the target commit
+    repo.write_file("d.txt", "d\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    repo.squire(&["amend", "--commit", &target[..8], id]);
+
+    // d.txt should be in the target commit (HEAD~1), not HEAD
+    let target_show = repo.git(&["show", "--stat", "HEAD~1"]);
+    assert!(target_show.contains("d.txt"));
+    let head_show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(!head_show.contains("d.txt"));
+    // All commit messages should be preserved
+    let log = repo.git(&["log", "--oneline", "-3"]);
+    assert!(log.contains("target"));
+    assert!(log.contains("third"));
+}
+
+#[test]
+fn amend_commit_head_same_as_default() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    repo.write_file("g.txt", "extra\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    repo.squire(&["amend", "--commit", "HEAD", id]);
+
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(show.contains("g.txt"));
+    let log = repo.git(&["log", "--oneline", "-1"]);
+    assert!(log.contains("target"));
+}
+
+#[test]
+fn amend_commit_rejects_message_for_non_head() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+    repo.write_file("c.txt", "c\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let err = repo.squire_err(&["amend", "--commit", "HEAD~1", "-m", "nope", id]);
+    assert!(err.contains("cannot be used"));
+}
+
 // --- hunk ID prefix matching ---
 
 #[test]
