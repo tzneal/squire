@@ -101,6 +101,13 @@ pub fn branch(dir: &Path) -> Result<String, String> {
         "rev-parse",
         &["--abbrev-ref".to_string(), "HEAD".to_string()],
     )
+    .or_else(|_| {
+        git_cmd(
+            dir,
+            "symbolic-ref",
+            &["--short".to_string(), "HEAD".to_string()],
+        )
+    })
     .map(|s| s.trim().to_string())
 }
 

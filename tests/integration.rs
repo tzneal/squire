@@ -486,6 +486,18 @@ fn status_includes_untracked_files() {
 }
 
 #[test]
+fn status_works_on_repo_with_no_commits() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "hello\n");
+
+    let output = repo.squire(&["--json", "status"]);
+    let status: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(status["branch"], "main");
+    assert_eq!(status["unstaged"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn status_empty_repo_shows_no_hunks() {
     let repo = TestRepo::new();
     repo.write_file("f.txt", "content\n");
