@@ -7,7 +7,7 @@ Non-interactive, hunk-addressable git staging CLI for LLMs.
 `git add -p` is an interactive TUI that LLMs can't drive. squire
 exposes the same hunk-level staging through single commands with
 structured arguments, so an LLM (or script) can selectively stage,
-unstage, and show hunks without any interactive prompts. It also
+unstage, revert, and show hunks without any interactive prompts. It also
 provides branch cleanup analysis to identify merged, squash-merged,
 and stale branches.
 
@@ -54,13 +54,15 @@ squire show HEAD abc12345            # hunk from last commit (falls back to diff
 squire show HEAD~2 abc12345          # hunk from two commits ago
 ```
 
-### Stage and unstage hunks
+### Stage, unstage, and revert hunks
 
 ```bash
 squire stage abc12345 def67890       # stage specific hunks
 squire stage abc12345:f3,a1          # stage specific lines by hash
 squire stage abc12345:f3-7b          # stage a range of lines
 squire unstage abc12345              # unstage specific hunks
+squire revert abc12345               # discard changes from working tree
+squire revert abc12345:f3,a1         # revert specific lines
 ```
 
 ### Commit and amend
@@ -155,6 +157,7 @@ squire wraps standard git primitives:
 - `git show <sha>` for commit diffs
 - `git apply --cached` to stage patches
 - `git apply --cached --reverse` to unstage patches
+- `git apply --reverse` to revert working tree changes
 
 `squire` parses unified diff output, assigns content-hash IDs to each hunk,
 and reconstructs patches from selected hunks when staging or
@@ -183,7 +186,7 @@ Pass `--json` to get structured output from any command. `diff` and
 The `header` field is present only when the `@@` line includes a
 section header (for example, a function name).
 
-`stage` and `unstage` return a result object:
+`stage`, `unstage`, and `revert` return a result object:
 
 ```json
 { "staged": 2, "message": "Staged 2 hunk(s)" }

@@ -84,6 +84,38 @@ pub fn apply_cached(dir: &Path, patch: &str, reverse: bool) -> Result<(), String
     Ok(())
 }
 
+/// Pipe a patch to `git apply --reverse` against the working tree.
+pub fn apply_worktree(dir: &Path, patch: &str) -> Result<(), String> {
+    use std::io::Write;
+    let args = [
+        "apply",
+        "--reverse",
+        "--unidiff-zero",
+        "--whitespace=nowarn",
+    ];
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run git apply: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("failed to open stdin for git apply")?
+        .write_all(patch.as_bytes())
+        .map_err(|e| format!("failed to write patch: {e}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git apply failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git apply --reverse failed: {stderr}"));
+    }
+    Ok(())
+}
+
 /// True if the working tree and index are clean.
 pub fn is_clean(dir: &Path) -> Result<bool, String> {
     let output = Command::new("git")

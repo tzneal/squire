@@ -316,6 +316,90 @@ fn unstage_subset_of_hunks() {
 }
 
 #[test]
+fn revert_single_hunk() {
+    let repo = TestRepo::with_committed_file("f.txt", "old\n", "new\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    repo.squire(&["revert", id]);
+
+    // Change should be gone from working tree
+    let diff = repo.git(&["diff"]);
+    assert!(diff.trim().is_empty());
+
+    // File should have original content
+    let content = std::fs::read_to_string(repo.path().join("f.txt")).unwrap();
+    assert_eq!(content, "old\n");
+}
+
+#[test]
+fn revert_subset_of_hunks() {
+    let repo =
+        TestRepo::with_two_committed_files("a.txt", "aaa\n", "AAA\n", "b.txt", "bbb\n", "BBB\n");
+
+    let hunks = repo.diff_json();
+    let a_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap().contains("a.txt"))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    repo.squire(&["revert", a_id]);
+
+    // a.txt reverted, b.txt still changed
+    let diff = repo.git(&["diff"]);
+    assert!(!diff.contains("+AAA"));
+    assert!(diff.contains("+BBB"));
+}
+
+#[test]
+fn revert_with_line_selector() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "ctx1\nold1\nctx2\nold2\nctx3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "ctx1\nnew1\nctx2\nnew2\nctx3\n");
+
+    let hunks = repo.diff_json();
+    let hunk = &hunks[0];
+    let line_hashes = hunk["line_hashes"].as_array().unwrap();
+    let content_str = hunk["content"].as_str().unwrap();
+    let lines: Vec<&str> = content_str.lines().collect();
+
+    // Find hashes for -old1 and +new1 (the first change pair)
+    let mut first_change_hashes = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if *line == "-old1" || *line == "+new1" {
+            first_change_hashes.push(line_hashes[i].as_str().unwrap());
+        }
+    }
+    assert_eq!(first_change_hashes.len(), 2);
+
+    let id = hunk["id"].as_str().unwrap();
+    let selector = format!("{id}:{},{}", first_change_hashes[0], first_change_hashes[1]);
+    repo.squire(&["revert", &selector]);
+
+    // Only the first change should be reverted
+    let content = std::fs::read_to_string(repo.path().join("f.txt")).unwrap();
+    assert!(content.contains("old1"), "first change should be reverted");
+    assert!(content.contains("new2"), "second change should remain");
+}
+
+#[test]
+fn revert_json_output() {
+    let repo = TestRepo::with_committed_file("f.txt", "old\n", "new\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let output = repo.squire(&["--json", "revert", id]);
+    let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["reverted"], 1);
+}
+
+#[test]
 fn stage_line_range_stages_partial_hunk() {
     let repo = TestRepo::new();
     repo.write_file("f.txt", "ctx1\nold1\nctx2\nold2\nctx3\n");
