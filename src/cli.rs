@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
         squire stage abc12345 def67890 # stage two hunks",
     after_long_help = "NOTE: If you are an LLM or agent, run `squire --llm-help` for a complete reference."
 )]
+#[command(version)]
 pub struct Cli {
     /// Output as JSON instead of plain text
     #[arg(long, global = true)]
