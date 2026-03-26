@@ -102,6 +102,14 @@ COMMANDS
       squire unstage abc12345
       squire unstage abc12345:f3,a1
 
+  squire revert <hunk-id>[:<line-selector>]...
+    Revert hunks by ID from the working tree (discards changes).
+    Same line selector syntax as stage. For line selectors, select
+    both the - and + lines of a change pair to revert it.
+      squire revert abc12345
+      squire revert abc12345:f3,a1
+      squire revert abc12345 def67890
+
   squire commit -m <message> <hunk-id>[:<line-selector>]...
     Stage hunks and commit in one step. Equivalent to
     `squire stage <ids> && git commit -m <message>`.
@@ -223,7 +231,7 @@ JSON OUTPUT
       \"content\": \"...\", \"line_hashes\": [\"f3\", \"a1\", \"7b\", ...] }
   commit returns: { \"committed\": N, \"message\": \"...\" }
   amend returns: { \"amended\": N, \"message\": \"...\" }
-  stage/unstage return: { \"staged\": N, \"message\": \"...\" }
+  stage/unstage/revert return: { \"staged\": N, \"message\": \"...\" }
   status returns:
     { \"branch\": \"main\", \"rebase_in_progress\": false,
       \"staged\": [...], \"unstaged\": [...],
@@ -324,6 +332,23 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Unstage {
         /// One or more hunk IDs to unstage
+        #[arg(required = true)]
+        hunk_ids: Vec<String>,
+    },
+
+    /// Revert specific hunks from the working tree
+    ///
+    /// Finds the specified hunks from the unstaged working tree diff
+    /// and reverse-applies them, discarding those changes. Supports
+    /// the same line-selector syntax as `squire stage`.
+    ///
+    /// Examples:
+    ///   squire revert abc12345             # revert one hunk
+    ///   squire revert abc12345:f3,a1       # revert specific lines
+    ///   squire revert abc12345 def67890    # revert multiple hunks
+    #[command(verbatim_doc_comment)]
+    Revert {
+        /// One or more hunk IDs to revert
         #[arg(required = true)]
         hunk_ids: Vec<String>,
     },

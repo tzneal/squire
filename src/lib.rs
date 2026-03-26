@@ -49,7 +49,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                     Some(sel) => {
                         let line_hashes = resolve_selector(hunk, sel)?;
                         let refs: Vec<&str> = line_hashes.iter().map(|s| s.as_str()).collect();
-                        diff::select_lines(hunk, &refs)
+                        diff::select_lines(hunk, &refs, false)
                     }
                     None => Ok(hunk.clone()),
                 }
@@ -94,6 +94,21 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 key,
                 total,
                 &format!("{label} {total} hunk(s)"),
+            );
+        }
+        Command::Revert { hunk_ids } => {
+            let (raw, _) = diff_with_untracked(dir, &[])?;
+            let hunks = diff::parse_diff(&raw)?;
+            let selected = resolve_hunks(&hunks, hunk_ids, true)?;
+            let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
+            let patch = diff::reconstruct_patch(&refs);
+            git::apply_worktree(dir, &patch)?;
+            emit_result(
+                &mut out,
+                cli.json,
+                "reverted",
+                selected.len(),
+                &format!("Reverted {} hunk(s)", selected.len()),
             );
         }
         Command::Commit { message, hunk_ids } => {
@@ -469,7 +484,7 @@ fn print_hunks(
 /// Parse diff, resolve hunk IDs, build patch, and apply to index. Returns hunk count.
 fn stage_hunks(dir: &Path, raw: &str, hunk_ids: &[String], reverse: bool) -> Result<usize, String> {
     let hunks = diff::parse_diff(raw)?;
-    let selected = resolve_hunks(&hunks, hunk_ids)?;
+    let selected = resolve_hunks(&hunks, hunk_ids, false)?;
     let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
     let patch = diff::reconstruct_patch(&refs);
     git::apply_cached(dir, &patch, reverse)?;
@@ -525,6 +540,7 @@ fn find_hunk<'a>(hunks: &'a [diff::HunkInfo], id: &str) -> Result<&'a diff::Hunk
 fn resolve_hunks(
     hunks: &[diff::HunkInfo],
     hunk_ids: &[String],
+    reverse: bool,
 ) -> Result<Vec<diff::HunkInfo>, String> {
     let mut selected = Vec::new();
     for arg in hunk_ids {
@@ -532,7 +548,7 @@ fn resolve_hunks(
             let hunk = find_hunk(hunks, id)?;
             let line_hashes = resolve_selector(hunk, selector)?;
             let refs: Vec<&str> = line_hashes.iter().map(|s| s.as_str()).collect();
-            selected.push(diff::select_lines(hunk, &refs)?);
+            selected.push(diff::select_lines(hunk, &refs, reverse)?);
         } else {
             let hunk = find_hunk(hunks, arg)?;
             selected.push(hunk.clone());

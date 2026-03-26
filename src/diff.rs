@@ -277,7 +277,11 @@ fn is_binary(bytes: &[u8]) -> bool {
 
 /// Build a sub-hunk containing only the selected lines (by line hash).
 /// Unselected `-` lines become context, unselected `+` lines are dropped.
-pub fn select_lines(hunk: &HunkInfo, selected_hashes: &[&str]) -> Result<HunkInfo, String> {
+pub fn select_lines(
+    hunk: &HunkInfo,
+    selected_hashes: &[&str],
+    reverse: bool,
+) -> Result<HunkInfo, String> {
     let lines: Vec<&str> = hunk.content.lines().collect();
     if lines.is_empty() {
         return Err("hunk has no content lines".into());
@@ -342,13 +346,24 @@ pub fn select_lines(hunk: &HunkInfo, selected_hashes: &[&str]) -> Result<HunkInf
         } else {
             match prefix {
                 Some(b'-') => {
-                    // Unselected remove → context
-                    new_lines.push(format!(" {}", &line[1..]));
-                    old_count += 1;
-                    new_count += 1;
+                    if reverse {
+                        // Revert: unselected remove → drop (line doesn't exist in working tree)
+                    } else {
+                        // Stage: unselected remove → context
+                        new_lines.push(format!(" {}", &line[1..]));
+                        old_count += 1;
+                        new_count += 1;
+                    }
                 }
                 Some(b'+') => {
-                    // Unselected add → drop
+                    if reverse {
+                        // Revert: unselected add → context (line exists in working tree)
+                        new_lines.push(format!(" {}", &line[1..]));
+                        old_count += 1;
+                        new_count += 1;
+                    } else {
+                        // Stage: unselected add → drop
+                    }
                 }
                 _ => {
                     // Context stays
@@ -565,7 +580,7 @@ mod tests {
         let h = &hunks[0];
         // Select the -old1 and +new1 lines (indices 1 and 2)
         let sel = vec![h.line_hashes[1].as_str(), h.line_hashes[2].as_str()];
-        let sub = select_lines(h, &sel).unwrap();
+        let sub = select_lines(h, &sel, false).unwrap();
         assert!(sub.content.contains("-old1"));
         assert!(sub.content.contains("+new1"));
         // old2/new2 should not be changed — -old2 becomes context, +new2 dropped
@@ -577,7 +592,7 @@ mod tests {
     #[test]
     fn select_lines_unknown_hash_fails() {
         let hunks = parse_diff(SELECT_DIFF).unwrap();
-        let result = select_lines(&hunks[0], &["zzzzzz"]);
+        let result = select_lines(&hunks[0], &["zzzzzz"], false);
         assert!(result.is_err());
     }
 
@@ -608,7 +623,7 @@ mod tests {
         let hunks = parse_diff(HEADER_DIFF).unwrap();
         let h = &hunks[0];
         let sel = vec![h.line_hashes[1].as_str(), h.line_hashes[2].as_str()];
-        let sub = select_lines(h, &sel).unwrap();
+        let sub = select_lines(h, &sel, false).unwrap();
         assert_eq!(sub.header.as_deref(), Some("fn example()"));
     }
 
