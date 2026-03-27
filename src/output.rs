@@ -80,9 +80,15 @@ pub fn format_short(hunks: &[HunkInfo]) -> String {
     for hunk in hunks {
         let add = hunk.content.lines().filter(|l| l.starts_with('+')).count();
         let del = hunk.content.lines().filter(|l| l.starts_with('-')).count();
+        let first_change = hunk
+            .content
+            .lines()
+            .find(|l| l.starts_with('+') || l.starts_with('-'))
+            .map(|l| format!("{} {}", &l[..1], l[1..].trim_start()))
+            .unwrap_or_default();
         writeln!(
             buf,
-            "{}  {}  {}  +{}/-{}{}",
+            "{}  {}  {}  +{}/-{}{}  {}",
             hunk.id,
             hunk.file,
             hunk.new_range,
@@ -91,7 +97,8 @@ pub fn format_short(hunks: &[HunkInfo]) -> String {
             hunk.header
                 .as_ref()
                 .map(|h| format!("  {h}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            first_change,
         )
         .unwrap();
     }
@@ -159,6 +166,7 @@ mod tests {
         assert!(out.contains("src/main.rs"));
         assert!(out.contains("+1/-1"));
         assert!(out.contains("fn main()"));
+        assert!(out.contains("- old"));
     }
 
     #[test]
