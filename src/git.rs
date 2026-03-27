@@ -65,15 +65,13 @@ pub fn list_untracked(dir: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Pipe a patch to `git apply --cached`, optionally reversed.
-pub fn apply_cached(dir: &Path, patch: &str, reverse: bool) -> Result<(), String> {
+/// Pipe a patch to `git apply` with the given extra flags.
+fn apply(dir: &Path, patch: &str, extra_args: &[&str]) -> Result<(), String> {
     use std::io::Write;
-    let mut args = vec!["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn"];
-    if reverse {
-        args.push("--reverse");
-    }
     let mut child = Command::new("git")
-        .args(&args)
+        .arg("apply")
+        .args(["--unidiff-zero", "--whitespace=nowarn"])
+        .args(extra_args)
         .current_dir(dir)
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -90,46 +88,23 @@ pub fn apply_cached(dir: &Path, patch: &str, reverse: bool) -> Result<(), String
         .map_err(|e| format!("git apply failed: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let label = if reverse {
-            "git apply --reverse"
-        } else {
-            "git apply"
-        };
-        return Err(format!("{label} failed: {stderr}"));
+        return Err(format!("git apply failed: {stderr}"));
     }
     Ok(())
 }
 
+/// Pipe a patch to `git apply --cached`, optionally reversed.
+pub fn apply_cached(dir: &Path, patch: &str, reverse: bool) -> Result<(), String> {
+    let mut args = vec!["--cached"];
+    if reverse {
+        args.push("--reverse");
+    }
+    apply(dir, patch, &args)
+}
+
 /// Pipe a patch to `git apply --reverse` against the working tree.
 pub fn apply_worktree(dir: &Path, patch: &str) -> Result<(), String> {
-    use std::io::Write;
-    let args = [
-        "apply",
-        "--reverse",
-        "--unidiff-zero",
-        "--whitespace=nowarn",
-    ];
-    let mut child = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to run git apply: {e}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or("failed to open stdin for git apply")?
-        .write_all(patch.as_bytes())
-        .map_err(|e| format!("failed to write patch: {e}"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("git apply failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git apply --reverse failed: {stderr}"));
-    }
-    Ok(())
+    apply(dir, patch, &["--reverse"])
 }
 
 /// True if the working tree and index are clean.
@@ -276,6 +251,32 @@ pub fn rebase_edit_and_reset(dir: &Path, commit: &str) -> Result<(), String> {
     let parent = format!("{commit}~1");
     rebase_seqedit(dir, &parent, &[format!("edit:{commit}")])?;
     reset_mixed(dir, "HEAD~1")
+}
+
+/// Stash all working tree changes.
+pub fn stash_push(dir: &Path, message: Option<&str>) -> Result<(), String> {
+    let mut args = vec!["stash", "push", "-u"];
+    let msg;
+    if let Some(m) = message {
+        args.push("-m");
+        msg = m;
+        args.push(msg);
+    }
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to run git stash: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git stash failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Apply a patch forward (not reversed) to the working tree.
+pub fn apply_worktree_forward(dir: &Path, patch: &str) -> Result<(), String> {
+    apply(dir, patch, &[])
 }
 
 /// Fetch from origin. Returns true if fetch succeeded, false if no remote.

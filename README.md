@@ -175,6 +175,19 @@ argument is the target (survives), the rest are folded in. The
 target's message is kept by default; use `-m` to replace it.
 Requires a clean working tree.
 
+## Stash specific hunks
+
+```bash
+squire stash abc12345                        # stash one hunk
+squire stash -m "wip" abc12345              # stash with a message
+squire stash abc12345:f3,a1                 # stash specific lines
+squire stash abc12345 def67890              # stash multiple hunks
+```
+
+Removes the selected hunks from the working tree and saves them as a
+regular `git stash` entry. Other unstaged changes are preserved. Use
+`git stash pop` to restore — no special squire command needed.
+
 ## How it works
 
 squire wraps standard git primitives:

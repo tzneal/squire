@@ -1469,3 +1469,64 @@ fn squash_dirty_working_tree_fails() {
     let err = repo.squire_err(&["squash", "HEAD~1", "HEAD"]);
     assert!(err.contains("clean working tree"));
 }
+
+#[test]
+fn stash_selected_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    repo.write_file("a.txt", "a-modified\n");
+    repo.write_file("b.txt", "b-new\n");
+
+    let hunks = repo.diff_json();
+    assert_eq!(hunks.as_array().unwrap().len(), 2);
+
+    // Stash only the a.txt hunk
+    let a_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "a.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    repo.squire(&["stash", a_id]);
+
+    // b.txt should still be in the working tree
+    let remaining = repo.diff_json();
+    assert_eq!(remaining.as_array().unwrap().len(), 1);
+    assert_eq!(remaining[0]["file"].as_str().unwrap(), "b.txt");
+
+    // git stash list should show one entry
+    let stash_list = repo.git(&["stash", "list"]);
+    assert!(!stash_list.is_empty());
+
+    // Pop and verify a.txt is back
+    repo.git(&["stash", "pop"]);
+    let after_pop = repo.diff_json();
+    assert_eq!(after_pop.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn stash_all_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    repo.write_file("a.txt", "a-modified\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    repo.squire(&["stash", id]);
+
+    // Working tree should be clean
+    let remaining = repo.diff_json();
+    assert!(remaining.as_array().unwrap().is_empty());
+
+    // Stash should have the change
+    let stash_list = repo.git(&["stash", "list"]);
+    assert!(!stash_list.is_empty());
+}

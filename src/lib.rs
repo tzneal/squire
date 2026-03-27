@@ -510,6 +510,42 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             }
             std::fs::write(file, result).map_err(|e| format!("failed to write todo file: {e}"))?;
         }
+        Command::Stash { message, hunk_ids } => {
+            let (raw, _) = diff_with_untracked(dir, &[])?;
+            let hunks = diff::parse_diff(&raw)?;
+            let selected = resolve_hunks(&hunks, hunk_ids, false)?;
+            let selected_ids: std::collections::HashSet<&str> =
+                selected.iter().map(|h| h.id.as_str()).collect();
+            let keep: Vec<&diff::HunkInfo> = hunks
+                .iter()
+                .filter(|h| !selected_ids.contains(h.id.as_str()))
+                .collect();
+
+            let keep_patch = if keep.is_empty() {
+                None
+            } else {
+                Some(diff::reconstruct_patch(&keep))
+            };
+
+            if let Some(ref p) = keep_patch {
+                git::apply_worktree(dir, p)?;
+            }
+
+            let stash_result = git::stash_push(dir, message.as_deref());
+
+            if let Some(ref p) = keep_patch {
+                git::apply_worktree_forward(dir, p)?;
+            }
+
+            stash_result?;
+            emit_result(
+                &mut out,
+                cli.json,
+                "stashed",
+                selected.len(),
+                &format!("Stashed {} hunk(s)", selected.len()),
+            );
+        }
     }
     Ok(out)
 }
