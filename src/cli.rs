@@ -133,6 +133,14 @@ COMMANDS
       squire reword HEAD -m \"new message\"
       squire reword HEAD~2 -m \"fix: corrected typo\"
 
+  squire drop <commit> <hunk-id>...
+    Remove specific hunks from an existing commit (inverse of amend).
+    Find hunk IDs with `squire diff <commit>~1 <commit>` or `squire log --json`.
+    For HEAD: reverse-applies and amends.
+    For older commits: rebase + reverse-apply + amend + continue.
+      squire drop HEAD abc12345
+      squire drop HEAD~2 abc12345 def67890
+
   squire split <commit>
     Prepare to split a commit. Requires a clean working tree.
     Resets the target commit so its changes are unstaged, ready
@@ -269,6 +277,7 @@ JSON OUTPUT
   commit returns: { \"committed\": N, \"message\": \"...\" }
   amend returns: { \"amended\": N, \"message\": \"...\" }
   reword returns: { \"reworded\": true, \"message\": \"...\" }
+  drop returns: { \"dropped\": N, \"message\": \"...\" }
   squash returns: { \"squashed\": N, \"message\": \"...\" }
   stash returns: { \"stashed\": N, \"message\": \"...\" }
   stage/unstage/revert return: { \"staged\": N, \"message\": \"...\" }
@@ -465,6 +474,29 @@ pub enum Command {
         /// New commit message
         #[arg(short, long, required = true)]
         message: String,
+    },
+
+    /// Remove specific hunks from an existing commit
+    ///
+    /// Inverse of `amend`: finds hunks in the target commit and
+    /// reverse-applies them. Use `squire diff <commit>~1 <commit>`
+    /// or `squire log --json` to find hunk IDs.
+    ///
+    /// For HEAD: reverse-applies and amends.
+    /// For older commits: uses rebase to pause, reverse-apply, amend,
+    /// and continue. Requires a clean working tree.
+    ///
+    /// Examples:
+    ///   squire drop HEAD abc12345
+    ///   squire drop HEAD~2 abc12345 def67890
+    #[command(verbatim_doc_comment)]
+    Drop {
+        /// The commit to drop hunks from
+        #[arg(required = true)]
+        commit: String,
+        /// One or more hunk IDs to remove from the commit
+        #[arg(required = true)]
+        hunk_ids: Vec<String>,
     },
 
     /// Prepare to split a commit into multiple commits

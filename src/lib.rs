@@ -179,6 +179,42 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 ));
             }
         }
+        Command::Drop { commit, hunk_ids } => {
+            let target = git::rev_parse(dir, commit)?;
+            let head = git::rev_parse(dir, "HEAD")?;
+            let is_head = target == head;
+            if !is_head {
+                if !git::is_clean(dir)? {
+                    return Err(
+                        "drop requires a clean working tree for non-HEAD commits".to_string(),
+                    );
+                }
+                git::rebase_edit(dir, &target)?;
+            }
+            // After rebase_edit, the target is now HEAD
+            let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
+            let hunks = diff::parse_diff(&raw)?;
+            let selected = resolve_hunks(&hunks, hunk_ids, false)?;
+            let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
+            let patch = diff::reconstruct_patch(&refs);
+            git::apply_cached(dir, &patch, true)?;
+            git::commit_amend(dir, None)?;
+            if !is_head {
+                git::checkout_head(dir)?;
+                git::rebase_continue(dir)?;
+            }
+            emit_result(
+                &mut out,
+                cli.json,
+                "dropped",
+                selected.len(),
+                &format!(
+                    "Dropped {} hunk(s) from {}",
+                    selected.len(),
+                    &target[..8.min(target.len())]
+                ),
+            );
+        }
         Command::Status => {
             let branch = git::branch(dir)?;
             let rebasing = git::rebase_in_progress(dir)?;

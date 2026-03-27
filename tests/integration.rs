@@ -1082,6 +1082,130 @@ fn reword_older_commit_dirty_tree_fails() {
     assert!(err.contains("clean working tree"));
 }
 
+// --- drop ---
+
+#[test]
+fn drop_hunk_from_head() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("a.txt", "a2\n");
+    repo.write_file("b.txt", "b2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "change both"]);
+
+    // Find the a.txt hunk
+    let out = repo.squire(&["--json", "diff", "HEAD~1", "HEAD"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let a_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"] == "a.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    repo.squire(&["drop", "HEAD", &a_id]);
+
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(show.contains("b.txt"));
+    assert!(!show.contains("a.txt"));
+    let log = repo.git(&["log", "--oneline", "-1"]);
+    assert!(log.contains("change both"));
+}
+
+#[test]
+fn drop_hunk_from_older_commit() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("a.txt", "a2\n");
+    repo.write_file("b.txt", "b2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    repo.write_file("c.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    let out = repo.squire(&["--json", "diff", "HEAD~2", "HEAD~1"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let a_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"] == "a.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    repo.squire(&["drop", "HEAD~1", &a_id]);
+
+    // a.txt hunk should be gone from target commit (now HEAD~1)
+    let show = repo.git(&["show", "--stat", "HEAD~1"]);
+    assert!(show.contains("b.txt"));
+    assert!(!show.contains("a.txt"));
+    // third commit should still be there
+    let log = repo.git(&["log", "--oneline", "-3"]);
+    assert!(log.contains("target"));
+    assert!(log.contains("third"));
+}
+
+#[test]
+fn drop_json_output() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("a.txt", "a2\n");
+    repo.write_file("b.txt", "b2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "change"]);
+
+    let out = repo.squire(&["--json", "diff", "HEAD~1", "HEAD"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let a_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"] == "a.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let out = repo.squire(&["--json", "drop", "HEAD", &a_id]);
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(result["dropped"].as_u64().unwrap(), 1);
+}
+
+#[test]
+fn drop_older_commit_dirty_tree_fails() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("a.txt", "a2\n");
+    repo.write_file("b.txt", "b2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    repo.write_file("c.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+    repo.write_file("a.txt", "dirty\n");
+
+    let err = repo.squire_err(&["drop", "HEAD~1", "244cca06"]);
+    assert!(err.contains("clean working tree"));
+}
+
 // --- hunk ID prefix matching ---
 
 #[test]
