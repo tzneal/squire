@@ -126,6 +126,13 @@ COMMANDS
       squire amend --commit HEAD~2 abc12345  # amend older commit
       squire amend --commit HEAD~2 abc12345   # amend older commit
 
+  squire reword <commit> -m <message>
+    Change a commit message without staging hunks.
+    For HEAD: delegates to `git commit --amend -m`.
+    For older commits: uses seqedit reword + custom GIT_EDITOR.
+      squire reword HEAD -m \"new message\"
+      squire reword HEAD~2 -m \"fix: corrected typo\"
+
   squire split <commit>
     Prepare to split a commit. Requires a clean working tree.
     Resets the target commit so its changes are unstaged, ready
@@ -175,7 +182,7 @@ COMMANDS
     non-interactive rebase operations.
 
     Actions use the syntax action:sha-prefix where action is one of:
-    pick, edit, squash, fixup, drop. SHA prefixes match against the
+    pick, reword, edit, squash, fixup, drop. SHA prefixes match against the
     abbreviated commit hashes in the todo file (matching works in
     both directions for full and abbreviated SHAs).
 
@@ -261,6 +268,7 @@ JSON OUTPUT
       \"content\": \"...\", \"line_hashes\": [\"f3\", \"a1\", \"7b\", ...] }
   commit returns: { \"committed\": N, \"message\": \"...\" }
   amend returns: { \"amended\": N, \"message\": \"...\" }
+  reword returns: { \"reworded\": true, \"message\": \"...\" }
   squash returns: { \"squashed\": N, \"message\": \"...\" }
   stash returns: { \"stashed\": N, \"message\": \"...\" }
   stage/unstage/revert return: { \"staged\": N, \"message\": \"...\" }
@@ -440,6 +448,25 @@ pub enum Command {
         hunk_ids: Vec<String>,
     },
 
+    /// Change a commit message without staging hunks
+    ///
+    /// For HEAD: delegates to `git commit --amend -m`.
+    /// For older commits: uses a non-interactive rebase with reword.
+    /// Requires a clean working tree (for non-HEAD targets).
+    ///
+    /// Examples:
+    ///   squire reword HEAD -m "new message"
+    ///   squire reword HEAD~2 -m "fix: corrected typo"
+    #[command(verbatim_doc_comment)]
+    Reword {
+        /// The commit to reword
+        #[arg(required = true)]
+        commit: String,
+        /// New commit message
+        #[arg(short, long, required = true)]
+        message: String,
+    },
+
     /// Prepare to split a commit into multiple commits
     ///
     /// Resets the target commit so its changes are unstaged, ready
@@ -504,7 +531,7 @@ pub enum Command {
     /// non-interactive rebase operations.
     ///
     /// Actions use the syntax `action:sha-prefix` where action is
-    /// one of: pick, edit, squash, fixup, drop.
+    /// one of: pick, reword, edit, squash, fixup, drop.
     ///
     /// Examples:
     ///   GIT_SEQUENCE_EDITOR="squire seqedit edit:abc1234" git rebase -i HEAD~3
