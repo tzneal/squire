@@ -149,6 +149,19 @@ $ squire stage <id> && git commit -m "second half"
 $ git rebase --continue           # replay remaining commits
 ```
 
+## Edit rebase todo (sequence editor)
+
+```bash
+GIT_SEQUENCE_EDITOR="squire seqedit edit:abc1234" git rebase -i HEAD~3
+GIT_SEQUENCE_EDITOR="squire seqedit fixup:abc1 drop:def5" git rebase -i HEAD~5
+```
+
+`squire seqedit` rewrites a git rebase todo file, replacing sed/awk
+one-liners. It accepts one or more `action:sha-prefix` arguments
+followed by the todo file path (passed automatically by git).
+
+Supported actions: `pick`, `edit`, `squash`, `fixup`, `drop`.
+
 ## How it works
 
 squire wraps standard git primitives:

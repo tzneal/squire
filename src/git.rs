@@ -1,5 +1,21 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
+
+/// Resolve the path to the squire binary for use as GIT_SEQUENCE_EDITOR.
+/// Checks next to current_exe and one directory up (for cargo test, where
+/// the test binary is in target/debug/deps/ but squire is in target/debug/).
+fn squire_exe() -> Result<PathBuf, String> {
+    let current =
+        std::env::current_exe().map_err(|e| format!("failed to resolve current exe: {e}"))?;
+    for dir in current.ancestors().skip(1).take(2) {
+        let candidate = dir.join("squire");
+        if candidate.exists() && candidate != current {
+            return Ok(candidate);
+        }
+    }
+    Ok(current)
+}
 
 /// Run a git subcommand with args in the given directory and return stdout.
 fn git_cmd(dir: &Path, subcmd: &str, args: &[String]) -> Result<String, String> {
@@ -233,15 +249,12 @@ pub fn rebase_autosquash(dir: &Path, target_sha: &str) -> Result<(), String> {
 pub fn rebase_edit_and_reset(dir: &Path, commit: &str) -> Result<(), String> {
     // rebase onto the parent of the target commit
     let parent = format!("{commit}~1");
-    let editor_script = if cfg!(target_os = "macos") {
-        "sed -i '' '1s/^pick/edit/' \"$1\""
-    } else {
-        "sed -i '1s/^pick/edit/' \"$1\""
-    };
+    let exe = squire_exe()?;
+    let editor_script = format!("{} seqedit edit:{commit}", exe.display());
     let output = Command::new("git")
         .args(["rebase", "-i", &parent])
         .current_dir(dir)
-        .env("GIT_SEQUENCE_EDITOR", editor_script)
+        .env("GIT_SEQUENCE_EDITOR", &editor_script)
         .output()
         .map_err(|e| format!("failed to run git rebase: {e}"))?;
     if !output.status.success() {
