@@ -112,8 +112,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             );
         }
         Command::Commit { message, hunk_ids } => {
-            let (raw, _) = diff_with_untracked(dir, &[])?;
-            let total = stage_hunks(dir, &raw, hunk_ids, false)?;
+            let total = stage_hunks_or_cached(dir, hunk_ids)?;
             git::commit(dir, message)?;
             emit_result(
                 &mut out,
@@ -128,8 +127,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             commit,
             hunk_ids,
         } => {
-            let (raw, _) = diff_with_untracked(dir, &[])?;
-            let total = stage_hunks(dir, &raw, hunk_ids, false)?;
+            let total = stage_hunks_or_cached(dir, hunk_ids)?;
             match commit {
                 Some(rev) => {
                     let target = git::rev_parse(dir, rev)?;
@@ -481,7 +479,6 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                         let parts: Vec<&str> = line.splitn(3, ' ').collect();
                         if parts.len() >= 2
                             && !parts[0].starts_with('#')
-                            && !parts[1].is_empty()
                             && (parts[1].starts_with(sha_prefix)
                                 || sha_prefix.starts_with(parts[1]))
                         {
@@ -576,6 +573,32 @@ fn stage_hunks(dir: &Path, raw: &str, hunk_ids: &[String], reverse: bool) -> Res
     let patch = diff::reconstruct_patch(&refs);
     git::apply_cached(dir, &patch, reverse)?;
     Ok(selected.len())
+}
+
+/// Like stage_hunks, but accepts hunks that are already staged.
+/// Unstaged hunks get staged; already-staged hunks are counted but not re-applied.
+fn stage_hunks_or_cached(dir: &Path, hunk_ids: &[String]) -> Result<usize, String> {
+    let (unstaged_raw, _) = diff_with_untracked(dir, &[])?;
+    let unstaged = diff::parse_diff(&unstaged_raw)?;
+    let cached_raw = git::diff(dir, &["--cached".to_string()])?;
+    let cached = diff::parse_diff(&cached_raw)?;
+
+    let mut to_stage = Vec::new();
+    for arg in hunk_ids {
+        let id = arg.split_once(':').map_or(arg.as_str(), |(id, _)| id);
+        if find_hunk(&unstaged, id).is_ok() {
+            to_stage.push(arg.clone());
+        } else {
+            find_hunk(&cached, id).map_err(|_| format!("hunk {id} not found"))?;
+        }
+    }
+    if !to_stage.is_empty() {
+        let hunks_to_apply = resolve_hunks(&unstaged, &to_stage, false)?;
+        let refs: Vec<&diff::HunkInfo> = hunks_to_apply.iter().collect();
+        let patch = diff::reconstruct_patch(&refs);
+        git::apply_cached(dir, &patch, false)?;
+    }
+    Ok(hunk_ids.len())
 }
 
 fn emit_result(out: &mut Output, json: bool, key: &str, count: usize, msg: &str) {
