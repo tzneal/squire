@@ -169,6 +169,19 @@ COMMANDS
       squire cleanup --master main       # specify master branch
       squire cleanup --json              # structured output for LLM
 
+  squire seqedit <action:sha-prefix>... <todo-file>
+    Edit a git rebase todo file. Designed to be used as
+    GIT_SEQUENCE_EDITOR, replacing sed/awk one-liners for
+    non-interactive rebase operations.
+
+    Actions use the syntax action:sha-prefix where action is one of:
+    pick, edit, squash, fixup, drop. SHA prefixes match against the
+    abbreviated commit hashes in the todo file (matching works in
+    both directions for full and abbreviated SHAs).
+
+      GIT_SEQUENCE_EDITOR=\"squire seqedit edit:abc1234\" git rebase -i HEAD~3
+      GIT_SEQUENCE_EDITOR=\"squire seqedit fixup:abc1 drop:def5\" git rebase -i HEAD~5
+
 TYPICAL WORKFLOW
   1. squire diff --json                  # discover hunks, line hashes
   2. squire commit -m \"feat: ...\" <id>  # stage and commit in one step
@@ -464,5 +477,25 @@ pub enum Command {
         /// Number of commits to show
         #[arg(short, long, default_value = "10")]
         n: usize,
+    },
+
+    /// Edit a git rebase todo file (used as GIT_SEQUENCE_EDITOR)
+    ///
+    /// Reads a rebase todo file, applies the specified actions, and
+    /// writes it back. Designed to replace sed/awk one-liners in
+    /// non-interactive rebase operations.
+    ///
+    /// Actions use the syntax `action:sha-prefix` where action is
+    /// one of: pick, edit, squash, fixup, drop.
+    ///
+    /// Examples:
+    ///   GIT_SEQUENCE_EDITOR="squire seqedit edit:abc1234" git rebase -i HEAD~3
+    ///   GIT_SEQUENCE_EDITOR="squire seqedit fixup:abc1 drop:def5" git rebase -i HEAD~5
+    #[command(verbatim_doc_comment)]
+    Seqedit {
+        /// Actions (action:sha-prefix) followed by the todo file path.
+        /// Git passes the file as the last argument.
+        #[arg(trailing_var_arg = true, required = true)]
+        args: Vec<String>,
     },
 }

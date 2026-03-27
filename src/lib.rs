@@ -426,6 +426,68 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 }
             }
         }
+        Command::Seqedit { args } => {
+            if args.len() < 2 {
+                return Err("seqedit requires at least one action and a todo file path".to_string());
+            }
+            let (actions, file) = args.split_at(args.len() - 1);
+            let file = &file[0];
+
+            let todo = std::fs::read_to_string(file)
+                .map_err(|e| format!("failed to read todo file: {e}"))?;
+            let mut lines: Vec<String> = todo.lines().map(String::from).collect();
+
+            for action_arg in actions {
+                let (action, sha_prefix) = action_arg.split_once(':').ok_or_else(|| {
+                    format!("invalid action syntax: {action_arg} (expected action:sha)")
+                })?;
+                match action {
+                    "pick" | "edit" | "squash" | "fixup" | "drop" => {}
+                    _ => {
+                        return Err(format!(
+                            "unknown action: {action} (expected pick, edit, squash, fixup, or drop)"
+                        ));
+                    }
+                }
+                let matches: Vec<usize> = lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, line)| {
+                        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                        if parts.len() >= 2
+                            && !parts[0].starts_with('#')
+                            && !parts[1].is_empty()
+                            && (parts[1].starts_with(sha_prefix)
+                                || sha_prefix.starts_with(parts[1]))
+                        {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                match matches.len() {
+                    0 => return Err(format!("no todo line matches sha prefix: {sha_prefix}")),
+                    1 => {
+                        let line = &mut lines[matches[0]];
+                        let old_action = line.split(' ').next().unwrap();
+                        *line = line.replacen(old_action, action, 1);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "ambiguous sha prefix {sha_prefix}: matches {} lines",
+                            matches.len()
+                        ));
+                    }
+                }
+            }
+
+            let mut result = lines.join("\n");
+            if todo.ends_with('\n') {
+                result.push('\n');
+            }
+            std::fs::write(file, result).map_err(|e| format!("failed to write todo file: {e}"))?;
+        }
     }
     Ok(out)
 }
