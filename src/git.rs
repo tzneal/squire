@@ -244,6 +244,27 @@ pub fn rebase_autosquash(dir: &Path, target_sha: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Non-interactive rebase that marks source commits as fixup onto the target.
+pub fn rebase_squash(dir: &Path, target: &str, sources: &[String]) -> Result<(), String> {
+    let exe = squire_exe()?;
+    let actions: Vec<String> = sources.iter().map(|s| format!("fixup:{s}")).collect();
+    let mut editor_args = vec![exe.display().to_string(), "seqedit".to_string()];
+    editor_args.extend(actions);
+    let editor_script = editor_args.join(" ");
+    let parent = format!("{target}~1");
+    let output = Command::new("git")
+        .args(["rebase", "-i", &parent])
+        .current_dir(dir)
+        .env("GIT_SEQUENCE_EDITOR", &editor_script)
+        .output()
+        .map_err(|e| format!("failed to run git rebase: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git rebase failed: {stderr}"));
+    }
+    Ok(())
+}
+
 /// Non-interactive rebase that marks `commit` as "edit" and stops there,
 /// then does a mixed reset so changes are unstaged.
 pub fn rebase_edit_and_reset(dir: &Path, commit: &str) -> Result<(), String> {

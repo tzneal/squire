@@ -162,6 +162,19 @@ followed by the todo file path (passed automatically by git).
 
 Supported actions: `pick`, `edit`, `squash`, `fixup`, `drop`.
 
+## Squash commits
+
+```bash
+squire squash HEAD~2 HEAD~1 HEAD             # fold last 2 commits into HEAD~2
+squire squash abc1234 def5678                # fold def5678 into abc1234
+squire squash -m "combined" abc1234 def5678  # squash with new message
+```
+
+Folds one or more source commits into a target commit. The first
+argument is the target (survives), the rest are folded in. The
+target's message is kept by default; use `-m` to replace it.
+Requires a clean working tree.
+
 ## How it works
 
 squire wraps standard git primitives:
