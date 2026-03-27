@@ -253,14 +253,34 @@ pub fn rebase_edit_and_reset(dir: &Path, commit: &str) -> Result<(), String> {
     reset_mixed(dir, "HEAD~1")
 }
 
+/// Non-interactive rebase that rewords a commit's message.
+/// Uses seqedit to mark the commit as "reword" and a shell script as
+/// GIT_EDITOR that writes the new message into the editor file.
+pub fn rebase_reword(dir: &Path, commit: &str, message: &str) -> Result<(), String> {
+    let exe = squire_exe()?;
+    let seq_editor = format!("{} seqedit reword:{commit}", exe.display());
+    let parent = format!("{commit}~1");
+    // printf writes the new message into the file git opens for editing
+    let git_editor = format!("printf '%s' '{}' >", message.replace('\'', "'\\''"));
+    let output = Command::new("git")
+        .args(["rebase", "-i", &parent])
+        .current_dir(dir)
+        .env("GIT_SEQUENCE_EDITOR", &seq_editor)
+        .env("GIT_EDITOR", &git_editor)
+        .output()
+        .map_err(|e| format!("failed to run git rebase: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git rebase failed: {stderr}"));
+    }
+    Ok(())
+}
+
 /// Stash all working tree changes.
 pub fn stash_push(dir: &Path, message: Option<&str>) -> Result<(), String> {
     let mut args = vec!["stash", "push", "-u"];
-    let msg;
     if let Some(m) = message {
-        args.push("-m");
-        msg = m;
-        args.push(msg);
+        args.extend(["-m", m]);
     }
     let output = Command::new("git")
         .args(&args)

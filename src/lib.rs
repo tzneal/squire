@@ -155,6 +155,30 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 &format!("Amended {total} hunk(s) into HEAD"),
             );
         }
+        Command::Reword { commit, message } => {
+            let target = git::rev_parse(dir, commit)?;
+            let head = git::rev_parse(dir, "HEAD")?;
+            if target == head {
+                git::commit_amend(dir, Some(message))?;
+            } else {
+                if !git::is_clean(dir)? {
+                    return Err(
+                        "reword requires a clean working tree for non-HEAD commits".to_string()
+                    );
+                }
+                git::rebase_reword(dir, &target, message)?;
+            }
+            if cli.json {
+                out.println(
+                    &serde_json::json!({ "reworded": true, "message": message }).to_string(),
+                );
+            } else {
+                out.println(&format!(
+                    "Reworded commit {}",
+                    &target[..8.min(target.len())]
+                ));
+            }
+        }
         Command::Status => {
             let branch = git::branch(dir)?;
             let rebasing = git::rebase_in_progress(dir)?;
@@ -465,10 +489,10 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                     format!("invalid action syntax: {action_arg} (expected action:sha)")
                 })?;
                 match action {
-                    "pick" | "edit" | "squash" | "fixup" | "drop" => {}
+                    "pick" | "reword" | "edit" | "squash" | "fixup" | "drop" => {}
                     _ => {
                         return Err(format!(
-                            "unknown action: {action} (expected pick, edit, squash, fixup, or drop)"
+                            "unknown action: {action} (expected pick, reword, edit, squash, fixup, or drop)"
                         ));
                     }
                 }
