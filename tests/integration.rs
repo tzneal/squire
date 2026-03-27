@@ -890,6 +890,61 @@ fn amend_json_output() {
 }
 
 #[test]
+fn amend_already_staged_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "original msg"]);
+
+    // Stage a change via git add, then amend using the staged hunk ID
+    repo.write_file("g.txt", "extra\n");
+    repo.git(&["add", "g.txt"]);
+
+    let cached = repo.squire(&["--json", "diff", "--cached"]);
+    let hunks: serde_json::Value = serde_json::from_str(&cached).unwrap();
+    let id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "g.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    repo.squire(&["amend", id]);
+
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(show.contains("g.txt"));
+    let log = repo.git(&["log", "--oneline", "-1"]);
+    assert!(log.contains("original msg"));
+}
+
+#[test]
+fn commit_already_staged_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    repo.write_file("g.txt", "new\n");
+    repo.git(&["add", "g.txt"]);
+
+    let cached = repo.squire(&["--json", "diff", "--cached"]);
+    let hunks: serde_json::Value = serde_json::from_str(&cached).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    repo.squire(&["commit", "-m", "from staged", id]);
+
+    let log = repo.git(&["log", "--oneline", "-1"]);
+    assert!(log.contains("from staged"));
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(show.contains("g.txt"));
+}
+
+#[test]
 fn amend_into_older_commit() {
     let repo = TestRepo::new();
     repo.write_file("a.txt", "a\n");

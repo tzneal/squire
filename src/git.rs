@@ -244,16 +244,14 @@ pub fn rebase_autosquash(dir: &Path, target_sha: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Non-interactive rebase that marks source commits as fixup onto the target.
-pub fn rebase_squash(dir: &Path, target: &str, sources: &[String]) -> Result<(), String> {
+/// Non-interactive rebase with seqedit actions.
+fn rebase_seqedit(dir: &Path, parent: &str, actions: &[String]) -> Result<(), String> {
     let exe = squire_exe()?;
-    let actions: Vec<String> = sources.iter().map(|s| format!("fixup:{s}")).collect();
     let mut editor_args = vec![exe.display().to_string(), "seqedit".to_string()];
-    editor_args.extend(actions);
+    editor_args.extend_from_slice(actions);
     let editor_script = editor_args.join(" ");
-    let parent = format!("{target}~1");
     let output = Command::new("git")
-        .args(["rebase", "-i", &parent])
+        .args(["rebase", "-i", parent])
         .current_dir(dir)
         .env("GIT_SEQUENCE_EDITOR", &editor_script)
         .output()
@@ -265,23 +263,18 @@ pub fn rebase_squash(dir: &Path, target: &str, sources: &[String]) -> Result<(),
     Ok(())
 }
 
+/// Non-interactive rebase that marks source commits as fixup onto the target.
+pub fn rebase_squash(dir: &Path, target: &str, sources: &[String]) -> Result<(), String> {
+    let actions: Vec<String> = sources.iter().map(|s| format!("fixup:{s}")).collect();
+    let parent = format!("{target}~1");
+    rebase_seqedit(dir, &parent, &actions)
+}
+
 /// Non-interactive rebase that marks `commit` as "edit" and stops there,
 /// then does a mixed reset so changes are unstaged.
 pub fn rebase_edit_and_reset(dir: &Path, commit: &str) -> Result<(), String> {
-    // rebase onto the parent of the target commit
     let parent = format!("{commit}~1");
-    let exe = squire_exe()?;
-    let editor_script = format!("{} seqedit edit:{commit}", exe.display());
-    let output = Command::new("git")
-        .args(["rebase", "-i", &parent])
-        .current_dir(dir)
-        .env("GIT_SEQUENCE_EDITOR", &editor_script)
-        .output()
-        .map_err(|e| format!("failed to run git rebase: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git rebase failed: {stderr}"));
-    }
+    rebase_seqedit(dir, &parent, &[format!("edit:{commit}")])?;
     reset_mixed(dir, "HEAD~1")
 }
 
