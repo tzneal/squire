@@ -181,6 +181,16 @@ pub fn reset_mixed(dir: &Path, rev: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Reset working tree to match HEAD (checkout all files).
+pub fn checkout_head(dir: &Path) -> Result<(), String> {
+    git_cmd(
+        dir,
+        "checkout",
+        &["HEAD".to_string(), "--".to_string(), ".".to_string()],
+    )?;
+    Ok(())
+}
+
 /// Create a commit with the given message.
 pub fn commit(dir: &Path, message: &str) -> Result<(), String> {
     git_cmd(dir, "commit", &["-m".to_string(), message.to_string()])?;
@@ -248,9 +258,29 @@ pub fn rebase_squash(dir: &Path, target: &str, sources: &[String]) -> Result<(),
 /// Non-interactive rebase that marks `commit` as "edit" and stops there,
 /// then does a mixed reset so changes are unstaged.
 pub fn rebase_edit_and_reset(dir: &Path, commit: &str) -> Result<(), String> {
-    let parent = format!("{commit}~1");
-    rebase_seqedit(dir, &parent, &[format!("edit:{commit}")])?;
+    rebase_edit(dir, commit)?;
     reset_mixed(dir, "HEAD~1")
+}
+
+/// Non-interactive rebase that marks `commit` as "edit" and stops there.
+pub fn rebase_edit(dir: &Path, commit: &str) -> Result<(), String> {
+    let parent = format!("{commit}~1");
+    rebase_seqedit(dir, &parent, &[format!("edit:{commit}")])
+}
+
+/// Continue an in-progress rebase.
+pub fn rebase_continue(dir: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["rebase", "--continue"])
+        .current_dir(dir)
+        .env("GIT_EDITOR", "true")
+        .output()
+        .map_err(|e| format!("failed to run git rebase: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git rebase --continue failed: {stderr}"));
+    }
+    Ok(())
 }
 
 /// Non-interactive rebase that rewords a commit's message.
