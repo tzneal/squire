@@ -190,6 +190,14 @@ COMMANDS
       squire squash abc1234 def5678          # fold def5678 into abc1234
       squire squash -m \"combined\" abc1 def5  # squash with new message
 
+  squire stash [-m <message>] <hunk-id>[:<line-selector>]...
+    Stash specific hunks into git stash. Removes the selected hunks
+    from the working tree and saves them as a regular git stash entry.
+    Other unstaged changes are preserved. Use `git stash pop` to restore.
+      squire stash abc12345              # stash one hunk
+      squire stash -m \"wip\" abc12345    # stash with a message
+      squire stash abc12345:f3,a1       # stash specific lines
+      squire stash abc12345 def67890    # stash multiple hunks
 TYPICAL WORKFLOW
   1. squire diff --json                  # discover hunks, line hashes
   2. squire commit -m \"feat: ...\" <id>  # stage and commit in one step
@@ -254,6 +262,7 @@ JSON OUTPUT
   commit returns: { \"committed\": N, \"message\": \"...\" }
   amend returns: { \"amended\": N, \"message\": \"...\" }
   squash returns: { \"squashed\": N, \"message\": \"...\" }
+  stash returns: { \"stashed\": N, \"message\": \"...\" }
   stage/unstage/revert return: { \"staged\": N, \"message\": \"...\" }
   status returns:
     { \"branch\": \"main\", \"rebase_in_progress\": false,
@@ -526,5 +535,26 @@ pub enum Command {
         /// Target commit (first) followed by source commits to fold in
         #[arg(required = true, num_args = 2..)]
         commits: Vec<String>,
+    },
+
+    /// Stash specific hunks into git stash
+    ///
+    /// Temporarily removes the selected hunks from the working tree and
+    /// saves them as a regular git stash entry. Other unstaged changes
+    /// are preserved. Use `git stash pop` to restore.
+    ///
+    /// Examples:
+    ///   squire stash abc12345              # stash one hunk
+    ///   squire stash -m "wip" abc12345    # stash with a message
+    ///   squire stash abc12345:f3,a1       # stash specific lines
+    ///   squire stash abc12345 def67890    # stash multiple hunks
+    #[command(verbatim_doc_comment)]
+    Stash {
+        /// Optional stash message
+        #[arg(short, long)]
+        message: Option<String>,
+        /// One or more hunk IDs to stash
+        #[arg(required = true)]
+        hunk_ids: Vec<String>,
     },
 }
