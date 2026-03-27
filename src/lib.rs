@@ -426,6 +426,31 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 }
             }
         }
+        Command::Squash { message, commits } => {
+            if !git::is_clean(dir)? {
+                return Err("squash requires a clean working tree".to_string());
+            }
+            let target = git::rev_parse(dir, &commits[0])?;
+            let sources: Vec<String> = commits[1..]
+                .iter()
+                .map(|c| git::rev_parse(dir, c))
+                .collect::<Result<_, _>>()?;
+            git::rebase_squash(dir, &target, &sources)?;
+            if let Some(msg) = message {
+                git::commit_amend(dir, Some(msg))?;
+            }
+            emit_result(
+                &mut out,
+                cli.json,
+                "squashed",
+                sources.len(),
+                &format!(
+                    "Squashed {} commit(s) into {}",
+                    sources.len(),
+                    &target[..8.min(target.len())]
+                ),
+            );
+        }
         Command::Seqedit { args } => {
             if args.len() < 2 {
                 return Err("seqedit requires at least one action and a todo file path".to_string());

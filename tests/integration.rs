@@ -1332,3 +1332,85 @@ fn seqedit_ambiguous_sha_prefix_fails() {
         "expected ambiguity error, got: {err}"
     );
 }
+
+#[test]
+fn squash_folds_commit_into_target() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write_file("c.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "to-squash"]);
+
+    repo.write_file("d.txt", "d\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+
+    repo.squire(&["squash", &target[..8], "HEAD~1"]);
+
+    // Should be 3 commits: base, target (with c.txt folded in), later
+    let log = repo.git(&["log", "--oneline"]);
+    assert!(!log.contains("to-squash"), "squashed commit should be gone");
+    assert!(log.contains("target"));
+    assert!(log.contains("later"));
+
+    // c.txt should be in the target commit
+    let target_show = repo.git(&["show", "--stat", "HEAD~1"]);
+    assert!(target_show.contains("c.txt"));
+    assert!(target_show.contains("b.txt"));
+}
+
+#[test]
+fn squash_multiple_sources() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write_file("c.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "squash-me-1"]);
+    let src1 = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write_file("d.txt", "d\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "squash-me-2"]);
+    let src2 = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.squire(&["squash", &target[..8], &src1[..8], &src2[..8]]);
+
+    let log = repo.git(&["log", "--oneline"]);
+    assert_eq!(log.lines().count(), 2); // base + target
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(show.contains("b.txt"));
+    assert!(show.contains("c.txt"));
+    assert!(show.contains("d.txt"));
+}
+
+#[test]
+fn squash_dirty_working_tree_fails() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    repo.write_file("a.txt", "dirty\n");
+
+    let err = repo.squire_err(&["squash", "HEAD~1", "HEAD"]);
+    assert!(err.contains("clean working tree"));
+}

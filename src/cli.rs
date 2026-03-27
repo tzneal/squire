@@ -182,6 +182,14 @@ COMMANDS
       GIT_SEQUENCE_EDITOR=\"squire seqedit edit:abc1234\" git rebase -i HEAD~3
       GIT_SEQUENCE_EDITOR=\"squire seqedit fixup:abc1 drop:def5\" git rebase -i HEAD~5
 
+  squire squash [-m <message>] <target> <source>...
+    Fold source commits into the target commit. The target's message
+    is kept; use -m to replace it. Requires a clean working tree.
+    Uses seqedit + non-interactive rebase under the hood.
+      squire squash HEAD~2 HEAD~1 HEAD       # fold last 2 into HEAD~2
+      squire squash abc1234 def5678          # fold def5678 into abc1234
+      squire squash -m \"combined\" abc1 def5  # squash with new message
+
 TYPICAL WORKFLOW
   1. squire diff --json                  # discover hunks, line hashes
   2. squire commit -m \"feat: ...\" <id>  # stage and commit in one step
@@ -245,6 +253,7 @@ JSON OUTPUT
       \"content\": \"...\", \"line_hashes\": [\"f3\", \"a1\", \"7b\", ...] }
   commit returns: { \"committed\": N, \"message\": \"...\" }
   amend returns: { \"amended\": N, \"message\": \"...\" }
+  squash returns: { \"squashed\": N, \"message\": \"...\" }
   stage/unstage/revert return: { \"staged\": N, \"message\": \"...\" }
   status returns:
     { \"branch\": \"main\", \"rebase_in_progress\": false,
@@ -497,5 +506,25 @@ pub enum Command {
         /// Git passes the file as the last argument.
         #[arg(trailing_var_arg = true, required = true)]
         args: Vec<String>,
+    },
+
+    /// Squash commits into a target commit
+    ///
+    /// Folds one or more source commits into a target commit using a
+    /// non-interactive rebase. The target commit's message is kept;
+    /// source commits are discarded. Use -m to replace the message.
+    /// Requires a clean working tree.
+    ///
+    /// Examples:
+    ///   squire squash HEAD~2 HEAD~1 HEAD    # squash last 2 into HEAD~2
+    ///   squire squash -m "new msg" abc1234 def5678
+    #[command(verbatim_doc_comment)]
+    Squash {
+        /// Optional replacement commit message for the target
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Target commit (first) followed by source commits to fold in
+        #[arg(required = true, num_args = 2..)]
+        commits: Vec<String>,
     },
 }
