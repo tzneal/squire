@@ -400,6 +400,53 @@ fn revert_json_output() {
 }
 
 #[test]
+fn revert_staged_hunk() {
+    let repo = TestRepo::with_committed_file("f.txt", "old\n", "new\n");
+    repo.git(&["add", "f.txt"]);
+
+    // Hunk is now staged, not unstaged
+    let cached = repo.squire(&["--json", "diff", "--cached"]);
+    let hunks: serde_json::Value = serde_json::from_str(&cached).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    repo.squire(&["revert", id]);
+
+    // File should be back to original content
+    let content = std::fs::read_to_string(repo.path().join("f.txt")).unwrap();
+    assert_eq!(content, "old\n");
+    // Nothing should be staged or unstaged
+    let status = repo.squire(&["--json", "status"]);
+    let s: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert!(s["staged"].as_array().unwrap().is_empty());
+    assert!(s["unstaged"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn revert_mixed_staged_and_unstaged() {
+    let repo =
+        TestRepo::with_two_committed_files("a.txt", "aaa\n", "AAA\n", "b.txt", "bbb\n", "BBB\n");
+    // Stage a.txt, leave b.txt unstaged
+    repo.git(&["add", "a.txt"]);
+
+    let cached = repo.squire(&["--json", "diff", "--cached"]);
+    let cached_hunks: serde_json::Value = serde_json::from_str(&cached).unwrap();
+    let a_id = cached_hunks[0]["id"].as_str().unwrap().to_string();
+
+    let unstaged = repo.squire(&["--json", "diff"]);
+    let unstaged_hunks: serde_json::Value = serde_json::from_str(&unstaged).unwrap();
+    let b_id = unstaged_hunks[0]["id"].as_str().unwrap().to_string();
+
+    let output = repo.squire(&["--json", "revert", &a_id, &b_id]);
+    let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["reverted"], 2);
+
+    let a = std::fs::read_to_string(repo.path().join("a.txt")).unwrap();
+    let b = std::fs::read_to_string(repo.path().join("b.txt")).unwrap();
+    assert_eq!(a, "aaa\n");
+    assert_eq!(b, "bbb\n");
+}
+
+#[test]
 fn stage_line_range_stages_partial_hunk() {
     let repo = TestRepo::new();
     repo.write_file("f.txt", "ctx1\nold1\nctx2\nold2\nctx3\n");

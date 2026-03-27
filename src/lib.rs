@@ -97,18 +97,42 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             );
         }
         Command::Revert { hunk_ids } => {
-            let (raw, _) = diff_with_untracked(dir, &[])?;
-            let hunks = diff::parse_diff(&raw)?;
-            let selected = resolve_hunks(&hunks, hunk_ids, true)?;
-            let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
-            let patch = diff::reconstruct_patch(&refs);
-            git::apply_worktree(dir, &patch)?;
+            let (unstaged_raw, _) = diff_with_untracked(dir, &[])?;
+            let unstaged = diff::parse_diff(&unstaged_raw)?;
+            let cached_raw = git::diff(dir, &["--cached".to_string()])?;
+            let cached = diff::parse_diff(&cached_raw)?;
+
+            let mut unstaged_args = Vec::new();
+            let mut cached_args = Vec::new();
+            for arg in hunk_ids {
+                let id = arg.split_once(':').map_or(arg.as_str(), |(id, _)| id);
+                if find_hunk(&unstaged, id).is_ok() {
+                    unstaged_args.push(arg.clone());
+                } else {
+                    find_hunk(&cached, id).map_err(|_| format!("hunk {id} not found"))?;
+                    cached_args.push(arg.clone());
+                }
+            }
+            if !unstaged_args.is_empty() {
+                let resolved = resolve_hunks(&unstaged, &unstaged_args, true)?;
+                let refs: Vec<&diff::HunkInfo> = resolved.iter().collect();
+                let patch = diff::reconstruct_patch(&refs);
+                git::apply_worktree(dir, &patch)?;
+            }
+            if !cached_args.is_empty() {
+                let resolved = resolve_hunks(&cached, &cached_args, true)?;
+                let refs: Vec<&diff::HunkInfo> = resolved.iter().collect();
+                let patch = diff::reconstruct_patch(&refs);
+                git::apply_cached(dir, &patch, true)?;
+                git::apply_worktree(dir, &patch)?;
+            }
+            let total = unstaged_args.len() + cached_args.len();
             emit_result(
                 &mut out,
                 cli.json,
                 "reverted",
-                selected.len(),
-                &format!("Reverted {} hunk(s)", selected.len()),
+                total,
+                &format!("Reverted {total} hunk(s)"),
             );
         }
         Command::Commit { message, hunk_ids } => {
