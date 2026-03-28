@@ -152,24 +152,22 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             hunk_ids,
         } => {
             let total = stage_hunks_or_cached(dir, hunk_ids)?;
-            match commit {
-                Some(rev) => {
-                    let target = git::rev_parse(dir, rev)?;
-                    let head = git::rev_parse(dir, "HEAD")?;
-                    if target == head {
-                        git::commit_amend(dir, message.as_deref())?;
-                    } else {
-                        if message.is_some() {
-                            return Err(
-                                "-m cannot be used with --commit for non-HEAD targets".to_string()
-                            );
-                        }
-                        git::rebase_autosquash(dir, &target)?;
-                    }
-                }
-                None => {
+            if let Some(rev) = commit {
+                let target = git::rev_parse(dir, rev)?;
+                let head = git::rev_parse(dir, "HEAD")?;
+                if target == head {
                     git::commit_amend(dir, message.as_deref())?;
+                } else {
+                    if message.is_some() {
+                        return Err(
+                            "-m cannot be used with --commit for non-HEAD targets".to_string()
+                        );
+                    }
+                    git::rebase_autosquash(dir, &target)
+                        .map_err(|e| check_rebase_conflict(dir, e))?;
                 }
+            } else {
+                git::commit_amend(dir, message.as_deref())?;
             }
             emit_result(
                 &mut out,
@@ -190,7 +188,8 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                         "reword requires a clean working tree for non-HEAD commits".to_string()
                     );
                 }
-                git::rebase_reword(dir, &target, message)?;
+                git::rebase_reword(dir, &target, message)
+                    .map_err(|e| check_rebase_conflict(dir, e))?;
             }
             if cli.json {
                 out.println(
@@ -210,10 +209,10 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             if !is_head {
                 if !git::is_clean(dir)? {
                     return Err(
-                        "drop requires a clean working tree for non-HEAD commits".to_string(),
+                        "drop requires a clean working tree for non-HEAD commits".to_string()
                     );
                 }
-                git::rebase_edit(dir, &target)?;
+                git::rebase_edit(dir, &target).map_err(|e| check_rebase_conflict(dir, e))?;
             }
             // After rebase_edit, the target is now HEAD
             let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
@@ -225,7 +224,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             git::commit_amend(dir, None)?;
             if !is_head {
                 git::checkout_head(dir)?;
-                git::rebase_continue(dir)?;
+                git::rebase_continue(dir).map_err(|e| check_rebase_conflict(dir, e))?;
             }
             emit_result(
                 &mut out,
@@ -243,34 +242,61 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             let branch = git::branch(dir)?;
             let rebasing = git::rebase_in_progress(dir)?;
 
-            let cached_raw = git::diff(dir, &["--cached".to_string()])?;
-            let staged = diff::parse_diff(&cached_raw)?;
+            let conflicts = if rebasing {
+                git::conflicting_files(dir).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
 
+            let cached_raw = git::diff(dir, &["--cached".to_string()])?;
             let (unstaged_raw, _) = diff_with_untracked(dir, &[])?;
-            let unstaged = diff::parse_diff(&unstaged_raw)?;
+            let (staged, unstaged) = if conflicts.is_empty() {
+                (
+                    diff::parse_diff(&cached_raw)?,
+                    diff::parse_diff(&unstaged_raw)?,
+                )
+            } else {
+                (
+                    diff::parse_diff(&cached_raw).unwrap_or_default(),
+                    diff::parse_diff(&unstaged_raw).unwrap_or_default(),
+                )
+            };
 
             let (sa, sd) = output::count_lines(&staged);
             let (ua, ud) = output::count_lines(&unstaged);
 
             if cli.json {
-                out.println(
-                    &serde_json::json!({
-                        "branch": branch,
-                        "rebase_in_progress": rebasing,
-                        "staged": staged,
-                        "unstaged": unstaged,
-                        "staged_lines": { "added": sa, "removed": sd },
-                        "unstaged_lines": { "added": ua, "removed": ud },
-                    })
-                    .to_string(),
-                );
+                let mut status = serde_json::json!({
+                    "branch": branch,
+                    "rebase_in_progress": rebasing,
+                    "staged": staged,
+                    "unstaged": unstaged,
+                    "staged_lines": { "added": sa, "removed": sd },
+                    "unstaged_lines": { "added": ua, "removed": ud },
+                });
+                if !conflicts.is_empty() {
+                    let conflict_list: Vec<serde_json::Value> = conflicts
+                        .iter()
+                        .map(|(f, s)| serde_json::json!({"file": f, "status": s}))
+                        .collect();
+                    status["conflicts"] = serde_json::json!(conflict_list);
+                }
+                out.println(&status.to_string());
             } else {
                 out.println(&format!("On branch {branch}"));
                 if rebasing {
                     out.println("Rebase in progress");
                 }
+                if !conflicts.is_empty() {
+                    out.println(&format!("Conflicts ({}):", conflicts.len()));
+                    for (f, s) in &conflicts {
+                        out.println(&format!("  {s}: {f}"));
+                    }
+                    out.println("Resolve conflicts, stage with `git add`, then run `git rebase --continue`.");
+                    out.println("To cancel: `git rebase --abort`.");
+                }
                 let clean = staged.is_empty() && unstaged.is_empty();
-                if clean {
+                if clean && conflicts.is_empty() {
                     out.println("Nothing to commit, working tree clean");
                 } else {
                     let printer = if cli.short {
@@ -517,7 +543,8 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 .iter()
                 .map(|c| git::rev_parse(dir, c))
                 .collect::<Result<_, _>>()?;
-            git::rebase_squash(dir, &target, &sources)?;
+            git::rebase_squash(dir, &target, &sources)
+                .map_err(|e| check_rebase_conflict(dir, e))?;
             if let Some(msg) = message {
                 git::commit_amend(dir, Some(msg))?;
             }
@@ -683,6 +710,27 @@ fn print_hunks(
         out.stdout.push_str(&output::format_plain(hunks));
     }
     Ok(())
+}
+
+/// Check if a rebase error is actually a conflict, and if so, return a
+/// structured error message that includes the conflicting files.
+fn check_rebase_conflict(dir: &Path, err: String) -> String {
+    if let Ok(true) = git::rebase_in_progress(dir)
+        && let Ok(files) = git::conflicting_files(dir)
+        && !files.is_empty()
+    {
+        let file_list: Vec<serde_json::Value> = files
+            .iter()
+            .map(|(f, s)| serde_json::json!({"file": f, "status": s}))
+            .collect();
+        return serde_json::json!({
+            "conflict": true,
+            "conflicting_files": file_list,
+            "hint": "Resolve conflicts, stage with `git add`, then run `git rebase --continue`. To cancel: `git rebase --abort`."
+        })
+        .to_string();
+    }
+    err
 }
 
 /// Parse diff, resolve hunk IDs, build patch, and apply to index. Returns hunk count.

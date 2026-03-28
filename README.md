@@ -228,6 +228,66 @@ squire wraps standard git primitives:
 and reconstructs patches from selected hunks when staging or
 unstaging.
 
+### Design principle: don't replicate git
+
+squire adds value where git's interface is interactive, unstructured,
+or hunk-unaware. It does **not** wrap git commands that already work
+fine non-interactively. For example:
+
+- Stage an entire file → `git add <file>` (no squire needed)
+- Restore a stash → `git stash pop` (no squire needed)
+- Resolve conflicts → `git add` + `git rebase --continue` (no squire needed)
+- Abort a rebase → `git rebase --abort` (no squire needed)
+
+squire **detects and reports** conflicts with structured output so an
+LLM or script can decide what to do, but it doesn't try to resolve
+them or wrap the recovery commands.
+
+## Conflict reporting
+
+When a rebase-based command (`amend --commit`, `drop`, `squash`,
+`reword`) hits a conflict, squire returns a structured error instead
+of forwarding opaque git stderr:
+
+```json
+{
+  "conflict": true,
+  "conflicting_files": [
+    { "file": "src/lib.rs", "status": "both_modified" }
+  ],
+  "hint": "Resolve conflicts, stage with `git add`, then run `git rebase --continue`. To cancel: `git rebase --abort`."
+}
+```
+
+Plain text output:
+
+```
+Conflict during rebase:
+  both_modified: src/lib.rs
+Resolve conflicts, stage with `git add`, then run `git rebase --continue`.
+To cancel: `git rebase --abort`.
+```
+
+`squire status` also reports conflicts when a rebase is paused:
+
+```json
+{
+  "branch": "HEAD",
+  "rebase_in_progress": true,
+  "conflicts": [
+    { "file": "src/lib.rs", "status": "both_modified" }
+  ],
+  "staged": [],
+  "unstaged": [],
+  "staged_lines": { "added": 0, "removed": 0 },
+  "unstaged_lines": { "added": 0, "removed": 0 }
+}
+```
+
+The `conflicts` field is only present when there are unresolved
+conflicts. Possible status values: `both_modified`, `both_added`,
+`deleted_by_us`, `deleted_by_them`.
+
 ## JSON output
 
 Pass `--json` to get structured output from any command. `diff` and
@@ -259,7 +319,8 @@ section header (for example, a function name).
 
 `status` returns branch info, rebase state, hunks, and line counts.
 The `staged` and `unstaged` arrays contain the same hunk objects as
-`diff`:
+`diff`. The `conflicts` array is present only during a paused rebase
+with unresolved conflicts:
 
 ```json
 {

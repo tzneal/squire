@@ -1767,3 +1767,131 @@ fn stash_all_hunks() {
     let stash_list = repo.git(&["stash", "list"]);
     assert!(!stash_list.is_empty());
 }
+
+#[test]
+fn amend_conflict_returns_structured_error() {
+    // Create a repo where amending an older commit will conflict.
+    // We need 4 commits so HEAD~2 has a parent for the rebase.
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("f.txt", "first\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+
+    repo.write_file("f.txt", "second\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    repo.write_file("f.txt", "third\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    // Create a conflicting change and try to amend it into "first" (HEAD~2)
+    repo.write_file("f.txt", "conflict\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    let err_output = repo.squire_json_err(&["--json", "amend", "--commit", "HEAD~2", id]);
+    let parsed: serde_json::Value = serde_json::from_str(&err_output).unwrap();
+
+    assert_eq!(
+        parsed["conflict"].as_bool().unwrap(),
+        true,
+        "parsed: {parsed}"
+    );
+    let files = parsed["conflicting_files"].as_array().unwrap();
+    assert!(!files.is_empty());
+    assert_eq!(files[0]["file"].as_str().unwrap(), "f.txt");
+    assert!(
+        parsed["hint"]
+            .as_str()
+            .unwrap()
+            .contains("git rebase --continue")
+    );
+
+    // Clean up the paused rebase
+    repo.git(&["rebase", "--abort"]);
+}
+
+#[test]
+fn status_shows_conflicts_during_rebase() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("f.txt", "first\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+
+    repo.write_file("f.txt", "second\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    repo.write_file("f.txt", "third\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    // Try to amend into "first" (HEAD~2) to cause a conflict
+    repo.write_file("f.txt", "conflict\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~2", id]);
+
+    // Now check status — should show conflict info
+    let output = repo.squire(&["--json", "status"]);
+    let status: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(status["rebase_in_progress"].as_bool().unwrap(), true);
+    let conflicts = status["conflicts"].as_array().unwrap();
+    assert!(!conflicts.is_empty());
+    assert_eq!(conflicts[0]["file"].as_str().unwrap(), "f.txt");
+
+    // Clean up
+    repo.git(&["rebase", "--abort"]);
+}
+
+#[test]
+fn status_no_conflicts_field_when_clean() {
+    let repo = TestRepo::with_committed_file("a.txt", "old\n", "new\n");
+
+    let output = repo.squire(&["--json", "status"]);
+    let status: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert!(status.get("conflicts").is_none());
+}
+
+#[test]
+fn status_plain_shows_conflicts() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("f.txt", "first\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+
+    repo.write_file("f.txt", "second\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    repo.write_file("f.txt", "third\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    repo.write_file("f.txt", "conflict\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~2", id]);
+
+    let output = repo.squire(&["status"]);
+    assert!(output.contains("Conflicts"));
+    assert!(output.contains("f.txt"));
+    assert!(output.contains("git rebase --continue"));
+
+    repo.git(&["rebase", "--abort"]);
+}

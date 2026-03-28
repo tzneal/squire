@@ -356,32 +356,23 @@ pub fn detect_master_branch(dir: &Path, has_remote: bool) -> Result<String, Stri
                 return Ok(name.to_string());
             }
         }
-        for name in &["main", "master"] {
-            let result = Command::new("git")
-                .args(["rev-parse", "--verify", &format!("origin/{name}")])
-                .current_dir(dir)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if let Ok(s) = result
-                && s.success()
-            {
-                return Ok(name.to_string());
-            }
-        }
-    } else {
-        for name in &["main", "master"] {
-            let result = Command::new("git")
-                .args(["rev-parse", "--verify", name])
-                .current_dir(dir)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if let Ok(s) = result
-                && s.success()
-            {
-                return Ok(name.to_string());
-            }
+    }
+    for name in &["main", "master"] {
+        let ref_to_check = if has_remote {
+            format!("origin/{name}")
+        } else {
+            name.to_string()
+        };
+        let result = Command::new("git")
+            .args(["rev-parse", "--verify", &ref_to_check])
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if let Ok(s) = result
+            && s.success()
+        {
+            return Ok(name.to_string());
         }
     }
     Err("cannot detect master branch; use --master to specify".to_string())
@@ -465,6 +456,36 @@ pub fn cherry_applied(
         .filter(|l| l.starts_with('-'))
         .filter_map(|l| l.get(2..).map(String::from))
         .collect())
+}
+
+/// Return files with unmerged conflicts (during a paused rebase/merge).
+/// Each entry is (file, status) where status is e.g. "both_modified",
+/// "deleted_by_us", "deleted_by_them", "both_added".
+pub fn conflicting_files(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let raw = git_cmd(
+        dir,
+        "status",
+        &["--porcelain".to_string(), "-z".to_string()],
+    )?;
+    let mut result = Vec::new();
+    for entry in raw.split('\0') {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (xy, file) = entry.split_at(3);
+        let x = xy.as_bytes()[0];
+        let y = xy.as_bytes()[1];
+        let status = match (x, y) {
+            (b'U', b'U') => "both_modified",
+            (b'A', b'A') => "both_added",
+            (b'D', b'U') => "deleted_by_us",
+            (b'U', b'D') => "deleted_by_them",
+            (b'A', b'U') | (b'U', b'A') => "both_modified",
+            _ => continue,
+        };
+        result.push((file.to_string(), status.to_string()));
+    }
+    Ok(result)
 }
 
 /// Return the ISO date of the last commit on a branch.
