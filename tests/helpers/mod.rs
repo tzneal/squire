@@ -48,7 +48,11 @@ impl TestRepo {
         match result {
             Ok(out) => (out.stdout.clone(), Ok(out)),
             Err(ref e) if cli.json => {
-                let json_err = format!("{}\n", serde_json::json!({ "error": e }));
+                let json_err = if e.starts_with('{') {
+                    format!("{e}\n")
+                } else {
+                    format!("{}\n", serde_json::json!({ "error": e }))
+                };
                 (json_err, result)
             }
             _ => (String::new(), result),
