@@ -105,6 +105,8 @@ COMMANDS
 
   squire revert <hunk-id>[:<line-selector>]...
     Revert hunks by ID from the working tree (discards changes).
+    Works on both unstaged and staged hunks. Staged hunks are
+    unstaged and reverse-applied in one step.
     Same line selector syntax as stage. For line selectors, select
     both the - and + lines of a change pair to revert it.
       squire revert abc12345
@@ -387,8 +389,9 @@ pub enum Command {
 
     /// Revert specific hunks from the working tree
     ///
-    /// Finds the specified hunks from the unstaged working tree diff
-    /// and reverse-applies them, discarding those changes. Supports
+    /// Finds the specified hunks from the unstaged or staged diff
+    /// and reverse-applies them, discarding those changes. Staged
+    /// hunks are unstaged and reverse-applied in one step. Supports
     /// the same line-selector syntax as `squire stage`.
     ///
     /// Examples:
