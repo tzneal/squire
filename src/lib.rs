@@ -163,8 +163,20 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                             "-m cannot be used with --commit for non-HEAD targets".to_string()
                         );
                     }
-                    git::rebase_autosquash(dir, &target)
-                        .map_err(|e| check_rebase_conflict(dir, e))?;
+                    git::commit_fixup(dir, &target)?;
+                    let dirty = !git::is_clean(dir)?;
+                    if dirty {
+                        git::stash_push(dir, None)?;
+                    }
+                    if let Err(e) = git::rebase_autosquash(dir, &target) {
+                        if dirty {
+                            let _ = git::stash_pop(dir);
+                        }
+                        return Err(check_rebase_conflict(dir, e));
+                    }
+                    if dirty {
+                        git::stash_pop(dir)?;
+                    }
                 }
             } else {
                 git::commit_amend(dir, message.as_deref())?;

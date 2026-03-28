@@ -209,13 +209,17 @@ pub fn commit_amend(dir: &Path, message: Option<&str>) -> Result<(), String> {
 }
 
 /// Create a fixup commit targeting `target_sha` and autosquash-rebase it in.
-pub fn rebase_autosquash(dir: &Path, target_sha: &str) -> Result<(), String> {
-    let parent = format!("{target_sha}~1");
+pub fn commit_fixup(dir: &Path, target_sha: &str) -> Result<(), String> {
     git_cmd(
         dir,
         "commit",
         &["--fixup".to_string(), target_sha.to_string()],
-    )?;
+    )
+    .map(|_| ())
+}
+
+pub fn rebase_autosquash(dir: &Path, target_sha: &str) -> Result<(), String> {
+    let parent = format!("{target_sha}~1");
     let output = Command::new("git")
         .args(["rebase", "-i", "--autosquash", &parent])
         .current_dir(dir)
@@ -322,6 +326,10 @@ pub fn stash_push(dir: &Path, message: Option<&str>) -> Result<(), String> {
         return Err(format!("git stash failed: {stderr}"));
     }
     Ok(())
+}
+
+pub fn stash_pop(dir: &Path) -> Result<(), String> {
+    git_cmd(dir, "stash", &["pop".to_string()]).map(|_| ())
 }
 
 /// Apply a patch forward (not reversed) to the working tree.
