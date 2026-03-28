@@ -65,6 +65,32 @@ squire revert abc12345               # discard changes from working tree
 squire revert abc12345:f3,a1         # revert specific lines
 ```
 
+Revert works on both unstaged and staged hunks. Staged hunks are
+unstaged and reverse-applied in one step.
+
+### Reword a commit message
+
+```bash
+squire reword HEAD -m "new message"            # reword HEAD
+squire reword HEAD~2 -m "fix: corrected typo"  # reword older commit
+```
+
+For HEAD, delegates to `git commit --amend -m`. For older commits,
+uses a non-interactive rebase with reword. Requires a clean working
+tree for non-HEAD targets.
+
+### Drop hunks from a commit
+
+```bash
+squire drop HEAD abc12345                      # drop hunk from HEAD
+squire drop HEAD~2 abc12345 def67890           # drop hunks from older commit
+```
+
+Inverse of `amend`: removes specific hunks from an existing commit.
+Find hunk IDs with `squire diff <commit>~1 <commit>` or
+`squire log --json`. Requires a clean working tree for non-HEAD
+targets.
+
 ### Commit and amend
 
 ```bash
@@ -160,7 +186,7 @@ GIT_SEQUENCE_EDITOR="squire seqedit fixup:abc1 drop:def5" git rebase -i HEAD~5
 one-liners. It accepts one or more `action:sha-prefix` arguments
 followed by the todo file path (passed automatically by git).
 
-Supported actions: `pick`, `edit`, `squash`, `fixup`, `drop`.
+Supported actions: `pick`, `reword`, `edit`, `squash`, `fixup`, `drop`.
 
 ## Squash commits
 
