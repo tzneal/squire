@@ -1026,6 +1026,49 @@ fn amend_into_older_commit() {
 }
 
 #[test]
+fn amend_into_older_commit_with_dirty_tree() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write_file("c.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    // Two unstaged changes: one to amend, one to leave dirty
+    repo.write_file("d.txt", "d\n");
+    repo.write_file("e.txt", "e\n");
+
+    let hunks = repo.diff_json();
+    let d_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "d.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    // Amend only d.txt into the older commit — e.txt stays dirty
+    repo.squire(&["amend", "--commit", &target[..8], d_id]);
+
+    // d.txt should be in the target commit
+    let target_show = repo.git(&["show", "--stat", "HEAD~1"]);
+    assert!(target_show.contains("d.txt"));
+
+    // e.txt should still be an unstaged change in the working tree
+    let status = repo.git(&["status", "--porcelain"]);
+    assert!(status.contains("e.txt"));
+    assert!(std::fs::read_to_string(repo.path().join("e.txt")).unwrap() == "e\n");
+}
+
+#[test]
 fn amend_commit_head_same_as_default() {
     let repo = TestRepo::new();
     repo.write_file("f.txt", "v1\n");
