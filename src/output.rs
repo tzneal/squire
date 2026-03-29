@@ -1,6 +1,10 @@
 use crate::diff::{CommitInfo, HunkInfo};
 use std::fmt::Write;
 
+fn short_sha(sha: &str) -> &str {
+    &sha[..8.min(sha.len())]
+}
+
 pub fn format_log_short(commits: &[CommitInfo]) -> String {
     let mut buf = String::new();
     if commits.is_empty() {
@@ -12,7 +16,7 @@ pub fn format_log_short(commits: &[CommitInfo]) -> String {
         writeln!(
             buf,
             "{}  {}  {} hunk{}  +{}/-{}",
-            &c.sha[..8.min(c.sha.len())],
+            short_sha(&c.sha),
             c.message,
             c.hunks.len(),
             if c.hunks.len() == 1 { "" } else { "s" },
@@ -31,11 +35,10 @@ pub fn format_log_plain(commits: &[CommitInfo]) -> String {
         return buf;
     }
     for c in commits {
-        writeln!(buf, "{}  {}", &c.sha[..8.min(c.sha.len())], c.message).unwrap();
+        writeln!(buf, "{}  {}", short_sha(&c.sha), c.message).unwrap();
         writeln!(buf, "  {}", c.date).unwrap();
         for hunk in &c.hunks {
-            let add = hunk.content.lines().filter(|l| l.starts_with('+')).count();
-            let del = hunk.content.lines().filter(|l| l.starts_with('-')).count();
+            let (add, del) = count_hunk_lines(hunk);
             writeln!(
                 buf,
                 "  {}  @@ -{} +{} @@  +{}/-{}{}",
@@ -57,15 +60,20 @@ pub fn format_log_plain(commits: &[CommitInfo]) -> String {
 }
 
 pub fn count_lines(hunks: &[HunkInfo]) -> (usize, usize) {
+    hunks
+        .iter()
+        .map(count_hunk_lines)
+        .fold((0, 0), |(a, d), (ha, hd)| (a + ha, d + hd))
+}
+
+fn count_hunk_lines(hunk: &HunkInfo) -> (usize, usize) {
     let mut add = 0;
     let mut del = 0;
-    for h in hunks {
-        for line in h.content.lines() {
-            if line.starts_with('+') {
-                add += 1;
-            } else if line.starts_with('-') {
-                del += 1;
-            }
+    for line in hunk.content.lines() {
+        match line.as_bytes().first() {
+            Some(b'+') => add += 1,
+            Some(b'-') => del += 1,
+            _ => {}
         }
     }
     (add, del)
@@ -78,8 +86,7 @@ pub fn format_short(hunks: &[HunkInfo]) -> String {
         return buf;
     }
     for hunk in hunks {
-        let add = hunk.content.lines().filter(|l| l.starts_with('+')).count();
-        let del = hunk.content.lines().filter(|l| l.starts_with('-')).count();
+        let (add, del) = count_hunk_lines(hunk);
         let first_change = hunk
             .content
             .lines()

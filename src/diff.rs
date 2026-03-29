@@ -44,24 +44,16 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
     let mut current_file = String::new();
     let mut prev_was_add = false;
     for line in diff_text.lines() {
+        if line.starts_with("+++ ") {
+            current_file = strip_diff_prefix(line.trim_start_matches("+++ "));
+        }
         if line.starts_with("\\ No newline at end of file") {
             if prev_was_add {
                 no_nl_new_side.insert(current_file.clone());
             }
             continue;
         }
-        if line.starts_with("+++ ") {
-            current_file = strip_diff_prefix(line.trim_start_matches("+++ "));
-            prev_was_add = false;
-        } else if line.starts_with("--- ")
-            || line.starts_with("@@ ")
-            || line.starts_with("diff ")
-            || line.starts_with("index ")
-        {
-            prev_was_add = false;
-        } else {
-            prev_was_add = line.starts_with('+');
-        }
+        prev_was_add = line.starts_with('+') && !line.starts_with("+++ ");
         cleaned.push_str(line);
         cleaned.push('\n');
     }
@@ -267,12 +259,7 @@ pub fn generate_untracked_diff(
 }
 
 fn is_binary(bytes: &[u8]) -> bool {
-    let check = if bytes.len() > 8000 {
-        &bytes[..8000]
-    } else {
-        bytes
-    };
-    check.contains(&0)
+    bytes[..bytes.len().min(8000)].contains(&0)
 }
 
 /// Build a sub-hunk containing only the selected lines (by line hash).
@@ -345,28 +332,18 @@ pub fn select_lines(
             }
         } else {
             match prefix {
-                Some(b'-') => {
-                    if reverse {
-                        // Revert: unselected remove → drop (line doesn't exist in working tree)
-                    } else {
-                        // Stage: unselected remove → context
-                        new_lines.push(format!(" {}", &line[1..]));
-                        old_count += 1;
-                        new_count += 1;
-                    }
+                Some(b'-') if !reverse => {
+                    new_lines.push(format!(" {}", &line[1..]));
+                    old_count += 1;
+                    new_count += 1;
                 }
-                Some(b'+') => {
-                    if reverse {
-                        // Revert: unselected add → context (line exists in working tree)
-                        new_lines.push(format!(" {}", &line[1..]));
-                        old_count += 1;
-                        new_count += 1;
-                    } else {
-                        // Stage: unselected add → drop
-                    }
+                Some(b'+') if reverse => {
+                    new_lines.push(format!(" {}", &line[1..]));
+                    old_count += 1;
+                    new_count += 1;
                 }
+                Some(b'-') | Some(b'+') => {} // drop
                 _ => {
-                    // Context stays
                     new_lines.push(line.to_string());
                     old_count += 1;
                     new_count += 1;
