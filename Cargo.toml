@@ -1,10 +1,15 @@
 [package]
+publish = false
 name = "squire"
+
 version = "0.1.2"
 edition = "2024"
 description = "Non-interactive, hunk-addressable git staging CLI for LLMs"
 repository = "https://github.com/tzneal/squire"
 license = "MIT"
+
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
