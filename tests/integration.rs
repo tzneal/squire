@@ -1938,3 +1938,219 @@ fn status_plain_shows_conflicts() {
 
     repo.git(&["rebase", "--abort"]);
 }
+
+#[test]
+fn show_non_hex_id_fails() {
+    let repo = TestRepo::with_committed_file("f.txt", "old\n", "new\n");
+    let err = repo.squire_err(&["show", "not-hex"]);
+    assert!(err.contains("not a valid hunk ID"));
+}
+
+#[test]
+fn show_with_line_selector_from_working_tree() {
+    let repo = TestRepo::with_committed_file("f.txt", "a\nb\nc\n", "a\nB\nc\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let h1 = hunks[0]["line_hashes"][1].as_str().unwrap();
+    let h2 = hunks[0]["line_hashes"][2].as_str().unwrap();
+    let sel = format!("{id}:{h1},{h2}");
+    let out = repo.squire(&["--json", "show", &sel]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(parsed[0]["content"].as_str().unwrap().contains("-b"));
+    assert!(parsed[0]["content"].as_str().unwrap().contains("+B"));
+}
+
+#[test]
+fn status_plain_clean_working_tree() {
+    let repo = TestRepo::with_committed_file("f.txt", "hello\n", "hello\n");
+    let out = repo.squire(&["status"]);
+    assert!(out.contains("Nothing to commit, working tree clean"));
+}
+
+#[test]
+fn status_plain_shows_staged_and_unstaged_sections() {
+    let repo = TestRepo::with_committed_file("f.txt", "a\n", "c\n");
+    // Stage a different file so we have both staged and unstaged
+    repo.write_file("g.txt", "new\n");
+    repo.git(&["add", "g.txt"]);
+    let out = repo.squire(&["status"]);
+    assert!(out.contains("Staged ("));
+    assert!(out.contains("Unstaged ("));
+}
+
+#[test]
+fn cleanup_plain_text_output() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Create a merged branch
+    repo.git(&["checkout", "-b", "merged-branch"]);
+    repo.write_file("f.txt", "changed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "change"]);
+    repo.git(&["checkout", "main"]);
+    repo.git(&["merge", "merged-branch"]);
+
+    // Create an unmerged branch
+    repo.git(&["checkout", "-b", "unmerged-branch"]);
+    repo.write_file("f.txt", "unmerged\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "unmerged work"]);
+    repo.git(&["checkout", "main"]);
+
+    let out = repo.squire(&["cleanup", "--master", "main"]);
+    assert!(out.contains("Master branch: main"));
+    assert!(out.contains("[MERGED]"));
+    assert!(out.contains("merged-branch"));
+    assert!(out.contains("[UNMERGED]"));
+    assert!(out.contains("unmerged-branch"));
+    assert!(out.contains("unmerged work"));
+}
+
+#[test]
+fn cleanup_squash_merged_branch_detected() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Create a branch with a commit
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("g.txt", "feature\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add feature"]);
+    repo.git(&["checkout", "main"]);
+
+    // Advance main so the branch is not ancestry-merged, then
+    // replicate the branch's change with the same message (squash merge).
+    repo.write_file("f.txt", "updated\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "advance main"]);
+    repo.write_file("g.txt", "feature\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add feature"]);
+
+    let out = repo.squire(&["--json", "cleanup", "--master", "main"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let branches = parsed["branches"].as_array().unwrap();
+    let feature = branches.iter().find(|b| b["name"] == "feature").unwrap();
+    assert_eq!(feature["status"], "merged_equivalent");
+}
+
+#[test]
+fn cleanup_needs_evaluation_branch() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Create a branch with a commit
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("g.txt", "branch version\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add feature"]);
+    repo.git(&["checkout", "main"]);
+
+    // Same message but different patch on main
+    repo.write_file("g.txt", "main version\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add feature"]);
+
+    let out = repo.squire(&["--json", "cleanup", "--master", "main"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let branches = parsed["branches"].as_array().unwrap();
+    let feature = branches.iter().find(|b| b["name"] == "feature").unwrap();
+    assert_eq!(feature["status"], "needs_evaluation");
+    assert!(feature["note"].as_str().unwrap().contains("patches differ"));
+}
+
+#[test]
+fn cleanup_partial_message_match() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Branch with two commits, only one message matches main
+    repo.git(&["checkout", "-b", "partial"]);
+    repo.write_file("g.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "shared msg"]);
+    repo.write_file("h.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "unique to branch"]);
+    repo.git(&["checkout", "main"]);
+
+    // Only one matching message on main
+    repo.write_file("x.txt", "x\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "shared msg"]);
+
+    let out = repo.squire(&["--json", "cleanup", "--master", "main"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let branches = parsed["branches"].as_array().unwrap();
+    let partial = branches.iter().find(|b| b["name"] == "partial").unwrap();
+    assert_eq!(partial["status"], "needs_evaluation");
+}
+
+#[test]
+fn squash_with_message_replacement() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+    repo.write_file("f.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+    repo.write_file("f.txt", "d\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    let out = repo.squire(&[
+        "--json", "squash", "-m", "combined", "HEAD~2", "HEAD~1", "HEAD",
+    ]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["squashed"], 2);
+
+    let log = repo.git(&["log", "-1", "--format=%s"]);
+    assert_eq!(log.trim(), "combined");
+}
+
+#[test]
+fn diff_short_mode_via_cli_flag() {
+    let repo = TestRepo::with_committed_file("f.txt", "old\n", "new\n");
+    let out = repo.squire(&["--short", "diff"]);
+    // Short mode: one line per hunk with id, file, range, +/-
+    assert!(out.contains("f.txt"));
+    assert!(out.contains("+1/-1"));
+}
+
+#[test]
+fn show_short_mode() {
+    let repo = TestRepo::with_committed_file("f.txt", "old\n", "new\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let out = repo.squire(&["--short", "show", id]);
+    assert!(out.contains("f.txt"));
+    assert!(out.contains("+1/-1"));
+}
+
+#[test]
+fn revert_line_selector_invalid_range_order() {
+    let repo = TestRepo::with_committed_file("f.txt", "a\nb\nc\nd\ne\n", "a\nB\nC\nD\ne\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let hashes = hunks[0]["line_hashes"].as_array().unwrap();
+    // Find the last and first change line hashes and reverse them
+    let last = hashes.last().unwrap().as_str().unwrap();
+    let first = hashes[0].as_str().unwrap();
+    // Use reversed range: last-first
+    let sel = format!("{id}:{last}-{first}");
+    let err = repo.squire_err(&["stage", &sel]);
+    assert!(err.contains("comes after") || err.contains("not found"));
+}

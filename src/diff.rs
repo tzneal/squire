@@ -672,6 +672,155 @@ index aaa..bbb 100644
     }
 
     #[test]
+    fn reconstruct_patch_new_file_uses_dev_null() {
+        let h = HunkInfo {
+            id: "aaaa1111".to_string(),
+            file: "new.txt".to_string(),
+            old_file: "/dev/null".to_string(),
+            old_range: "0,0".to_string(),
+            new_range: "1,1".to_string(),
+            content: "+hello\n".to_string(),
+            header: None,
+            line_hashes: vec!["aa".to_string()],
+            no_newline: false,
+        };
+        let patch = reconstruct_patch(&[&h]);
+        assert!(
+            patch.contains("--- /dev/null"),
+            "old side should be /dev/null"
+        );
+        assert!(patch.contains("+++ b/new.txt"));
+    }
+
+    #[test]
+    fn reconstruct_patch_deleted_file_uses_dev_null() {
+        let h = HunkInfo {
+            id: "bbbb2222".to_string(),
+            file: "/dev/null".to_string(),
+            old_file: "gone.txt".to_string(),
+            old_range: "1,1".to_string(),
+            new_range: "0,0".to_string(),
+            content: "-bye\n".to_string(),
+            header: None,
+            line_hashes: vec!["bb".to_string()],
+            no_newline: false,
+        };
+        let patch = reconstruct_patch(&[&h]);
+        assert!(patch.contains("--- a/gone.txt"));
+        assert!(
+            patch.contains("+++ /dev/null"),
+            "new side should be /dev/null"
+        );
+    }
+
+    #[test]
+    fn reconstruct_patch_appends_no_newline_marker() {
+        let h = HunkInfo {
+            id: "cccc3333".to_string(),
+            file: "f.txt".to_string(),
+            old_file: "f.txt".to_string(),
+            old_range: "1,1".to_string(),
+            new_range: "1,1".to_string(),
+            content: "-old\n+new\n".to_string(),
+            header: None,
+            line_hashes: vec!["cc".to_string(), "dd".to_string()],
+            no_newline: true,
+        };
+        let patch = reconstruct_patch(&[&h]);
+        assert!(patch.contains("\\ No newline at end of file"));
+    }
+
+    #[test]
+    fn generate_untracked_diff_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("empty.txt"), "").unwrap();
+        let (diff, binaries) =
+            generate_untracked_diff(&["empty.txt".to_string()], dir.path()).unwrap();
+        assert!(binaries.is_empty());
+        assert!(diff.contains("@@ -0,0 +0,0 @@"));
+    }
+
+    #[test]
+    fn generate_untracked_diff_binary_file_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bin.dat"), b"\x00\x01\x02").unwrap();
+        let (diff, binaries) =
+            generate_untracked_diff(&["bin.dat".to_string()], dir.path()).unwrap();
+        assert!(diff.is_empty());
+        assert_eq!(binaries, vec!["bin.dat"]);
+    }
+
+    #[test]
+    fn select_lines_empty_content_fails() {
+        let h = HunkInfo {
+            id: "deadbeef".to_string(),
+            file: "f.txt".to_string(),
+            old_file: "f.txt".to_string(),
+            old_range: "1,0".to_string(),
+            new_range: "1,0".to_string(),
+            content: String::new(),
+            header: None,
+            line_hashes: vec![],
+            no_newline: false,
+        };
+        assert!(select_lines(&h, &["aa"], false).is_err());
+    }
+
+    #[test]
+    fn select_lines_ambiguous_hash_fails() {
+        let hunks = parse_diff(SELECT_DIFF).unwrap();
+        assert!(!hunks.is_empty()); // sanity check
+        // Construct a hunk with duplicate hash prefixes manually
+        let h = HunkInfo {
+            id: "deadbeef".to_string(),
+            file: "f.txt".to_string(),
+            old_file: "f.txt".to_string(),
+            old_range: "1,2".to_string(),
+            new_range: "1,2".to_string(),
+            content: " ctx1\n ctx2\n".to_string(),
+            header: None,
+            line_hashes: vec!["aabb".to_string(), "aacc".to_string()],
+            no_newline: false,
+        };
+        let result = select_lines(&h, &["aa"], false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ambiguous"));
+    }
+
+    #[test]
+    fn select_lines_selected_context_counts_both_sides() {
+        // Select a context line — it should count toward both old and new
+        let diff = "\
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,3 @@
+ ctx1
+-old
++new
+ ctx2
+";
+        let hunks = parse_diff(diff).unwrap();
+        let h = &hunks[0];
+        // Select only the context line ctx1 (index 0)
+        let sel = vec![h.line_hashes[0].as_str()];
+        let sub = select_lines(h, &sel, false).unwrap();
+        // Should contain ctx1 as a selected context line
+        assert!(sub.content.contains(" ctx1"));
+        // ctx1 selected→context(1,1), -old unselected→context(1,1), +new dropped, ctx2 context(1,1)
+        assert_eq!(sub.old_range, "1,3");
+        assert_eq!(sub.new_range, "1,3");
+    }
+
+    #[test]
+    fn parse_log_malformed_line_errors() {
+        // A line with \0 but fewer than 4 parts
+        let raw = "abc123\0Author\0date_only\n";
+        let result = parse_log(raw);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unexpected log line"));
+    }
+
+    #[test]
     fn reconstruct_patch_different_old_files_same_new_file() {
         // Two hunks with different old_file but same file (e.g. two renames to same target)
         let h1 = HunkInfo {
