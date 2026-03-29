@@ -28,6 +28,27 @@ fn short_sha(sha: &str) -> &str {
     &sha[..8.min(sha.len())]
 }
 
+#[derive(serde::Serialize)]
+struct BranchInfo {
+    name: String,
+    status: String,
+    last_commit_date: String,
+    commit_count: usize,
+    commits: Vec<CommitSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct CommitSummary {
+    sha: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_in_master: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch_applied: Option<bool>,
+}
+
 /// Run squire with a parsed CLI in the given directory.
 pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
     let mut out = Output::default();
@@ -373,26 +394,6 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             let master_msgs = git::commit_messages(dir, &compare_ref, 500)?;
             let master_msg_set: std::collections::HashSet<&str> =
                 master_msgs.iter().map(|s| s.as_str()).collect();
-
-            #[derive(serde::Serialize)]
-            struct BranchInfo {
-                name: String,
-                status: String,
-                last_commit_date: String,
-                commit_count: usize,
-                commits: Vec<CommitSummary>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                note: Option<String>,
-            }
-            #[derive(serde::Serialize)]
-            struct CommitSummary {
-                sha: String,
-                message: String,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                message_in_master: Option<bool>,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                patch_applied: Option<bool>,
-            }
 
             let mut branches = Vec::new();
 
