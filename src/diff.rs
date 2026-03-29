@@ -622,7 +622,7 @@ mod tests {
     fn parse_log_with_leading_garbage_lines() {
         // Simulate git outputting unexpected lines before the first commit header
         let raw = "some warning line\n\
-                   abc123\0Author\02026-01-01T00:00:00Z\0first commit\n\
+                   abc123\x00Author\x002026-01-01T00:00:00Z\x00first commit\n\
                    --- a/f.txt\n\
                    +++ b/f.txt\n\
                    @@ -1,1 +1,1 @@\n\
