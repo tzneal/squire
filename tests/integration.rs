@@ -2137,6 +2137,36 @@ fn show_short_mode() {
 }
 
 #[test]
+fn diff_path_filter_excludes_untracked_outside_path() {
+    let repo = TestRepo::new();
+    repo.write_file("src/a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Create untracked files in and outside the path filter
+    repo.write_file("src/new.txt", "new in src\n");
+    repo.write_file("other/stray.txt", "stray\n");
+
+    let output = repo.squire(&["--json", "diff", "--", "src/"]);
+    let hunks: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let files: Vec<&str> = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["file"].as_str().unwrap())
+        .collect();
+
+    assert!(
+        files.contains(&"src/new.txt"),
+        "untracked file inside path filter should appear, got: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("stray")),
+        "untracked file outside path filter should be excluded, got: {files:?}"
+    );
+}
+
+#[test]
 fn revert_line_selector_invalid_range_order() {
     let repo = TestRepo::with_committed_file("f.txt", "a\nb\nc\nd\ne\n", "a\nB\nC\nD\ne\n");
     let hunks = repo.diff_json();

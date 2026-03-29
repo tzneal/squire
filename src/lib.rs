@@ -677,12 +677,21 @@ fn diff_with_untracked(dir: &Path, args: &[String]) -> Result<(String, Vec<Strin
     let mut raw = git::diff(dir, args)?;
     let mut binary_files = Vec::new();
     // Only include untracked files for plain working-tree diffs (no refs, no --cached).
-    let args_before_sep: Vec<&String> = args.iter().take_while(|a| *a != "--").collect();
-    let has_refs_or_cached = args_before_sep.iter().any(|a| {
+    // Clap strips the `--` separator, so args after it appear as bare positional args.
+    let has_refs_or_cached = args.iter().any(|a| {
         *a == "--cached" || *a == "--staged" || (!a.starts_with('-') && git::is_ref(dir, a))
     });
     if !has_refs_or_cached {
-        let files = git::list_untracked(dir)?;
+        let mut files = git::list_untracked(dir)?;
+        // Non-flag args that aren't refs are path filters — apply them to untracked files.
+        let path_filters: Vec<&str> = args
+            .iter()
+            .filter(|a| !a.starts_with('-') && !git::is_ref(dir, a))
+            .map(|s| s.as_str())
+            .collect();
+        if !path_filters.is_empty() {
+            files.retain(|f| path_filters.iter().any(|p| f.starts_with(p) || f == p));
+        }
         if !files.is_empty() {
             let root = std::path::PathBuf::from(git::toplevel(dir)?);
             let (diff_text, binaries) = diff::generate_untracked_diff(&files, &root)?;

@@ -89,6 +89,9 @@ impl TestRepo {
     // #[rustllmlint::allow(dead_public)]
     pub fn write_file(&self, name: &str, content: &str) {
         let path = self.dir.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(path, content).unwrap();
     }
 
