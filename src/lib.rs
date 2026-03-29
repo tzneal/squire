@@ -24,6 +24,10 @@ impl Output {
     }
 }
 
+fn short_sha(sha: &str) -> &str {
+    &sha[..8.min(sha.len())]
+}
+
 /// Run squire with a parsed CLI in the given directory.
 pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
     let mut out = Output::default();
@@ -157,12 +161,9 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 let head = git::rev_parse(dir, "HEAD")?;
                 if target == head {
                     git::commit_amend(dir, message.as_deref())?;
+                } else if message.is_some() {
+                    return Err("-m cannot be used with --commit for non-HEAD targets".to_string());
                 } else {
-                    if message.is_some() {
-                        return Err(
-                            "-m cannot be used with --commit for non-HEAD targets".to_string()
-                        );
-                    }
                     git::commit_fixup(dir, &target)?;
                     let dirty = !git::is_clean(dir)?;
                     if dirty {
@@ -194,12 +195,9 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             let head = git::rev_parse(dir, "HEAD")?;
             if target == head {
                 git::commit_amend(dir, Some(message))?;
+            } else if !git::is_clean(dir)? {
+                return Err("reword requires a clean working tree for non-HEAD commits".to_string());
             } else {
-                if !git::is_clean(dir)? {
-                    return Err(
-                        "reword requires a clean working tree for non-HEAD commits".to_string()
-                    );
-                }
                 git::rebase_reword(dir, &target, message)
                     .map_err(|e| check_rebase_conflict(dir, e))?;
             }
@@ -208,10 +206,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                     &serde_json::json!({ "reworded": true, "message": message }).to_string(),
                 );
             } else {
-                out.println(&format!(
-                    "Reworded commit {}",
-                    &target[..8.min(target.len())]
-                ));
+                out.println(&format!("Reworded commit {}", short_sha(&target)));
             }
         }
         Command::Drop { commit, hunk_ids } => {
@@ -246,7 +241,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 &format!(
                     "Dropped {} hunk(s) from {}",
                     selected.len(),
-                    &target[..8.min(target.len())]
+                    short_sha(&target)
                 ),
             );
         }
@@ -260,19 +255,18 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 Vec::new()
             };
 
+            let has_conflicts = !conflicts.is_empty();
             let cached_raw = git::diff(dir, &["--cached".to_string()])?;
             let (unstaged_raw, _) = diff_with_untracked(dir, &[])?;
-            let (staged, unstaged) = if conflicts.is_empty() {
-                (
-                    diff::parse_diff(&cached_raw)?,
-                    diff::parse_diff(&unstaged_raw)?,
-                )
-            } else {
-                (
-                    diff::parse_diff(&cached_raw).unwrap_or_default(),
-                    diff::parse_diff(&unstaged_raw).unwrap_or_default(),
-                )
+            let parse = |raw: &str| -> Result<Vec<diff::HunkInfo>, String> {
+                if has_conflicts {
+                    Ok(diff::parse_diff(raw).unwrap_or_default())
+                } else {
+                    diff::parse_diff(raw)
+                }
             };
+            let staged = parse(&cached_raw)?;
+            let unstaged = parse(&unstaged_raw)?;
 
             let (sa, sd) = output::count_lines(&staged);
             let (ua, ud) = output::count_lines(&unstaged);
@@ -409,20 +403,13 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
 
                 let last_date = git::branch_last_commit_date(dir, branch).unwrap_or_default();
 
-                if merged_set.contains(branch) {
-                    branches.push(BranchInfo {
-                        name: branch.clone(),
-                        status: "merged".to_string(),
-                        last_commit_date: last_date,
-                        commit_count: 0,
-                        commits: vec![],
-                        note: None,
-                    });
-                    continue;
-                }
+                let commits = if merged_set.contains(branch) {
+                    vec![]
+                } else {
+                    git::commits_not_in(dir, branch, &compare_ref)?
+                };
 
-                let commits = git::commits_not_in(dir, branch, &compare_ref)?;
-                if commits.is_empty() {
+                if merged_set.contains(branch) || commits.is_empty() {
                     branches.push(BranchInfo {
                         name: branch.clone(),
                         status: "merged".to_string(),
@@ -465,7 +452,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                     };
 
                     summaries.push(CommitSummary {
-                        sha: sha[..8.min(sha.len())].to_string(),
+                        sha: short_sha(sha).to_string(),
                         message: msg.clone(),
                         message_in_master: if msg_match { Some(true) } else { None },
                         patch_applied,
@@ -568,7 +555,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 &format!(
                     "Squashed {} commit(s) into {}",
                     sources.len(),
-                    &target[..8.min(target.len())]
+                    short_sha(&target)
                 ),
             );
         }
