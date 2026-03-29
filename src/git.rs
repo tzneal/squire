@@ -288,14 +288,21 @@ pub fn rebase_continue(dir: &Path) -> Result<(), String> {
 }
 
 /// Non-interactive rebase that rewords a commit's message.
-/// Uses seqedit to mark the commit as "reword" and a shell script as
-/// GIT_EDITOR that writes the new message into the editor file.
+/// Uses seqedit to mark the commit as "reword" and a temp file + `cp` as
+/// GIT_EDITOR to avoid shell-injection risks from arbitrary message content.
 pub fn rebase_reword(dir: &Path, commit: &str, message: &str) -> Result<(), String> {
     let exe = squire_exe()?;
     let seq_editor = format!("{} seqedit reword:{commit}", exe.display());
     let parent = format!("{commit}~1");
-    // printf writes the new message into the file git opens for editing
-    let git_editor = format!("printf '%s' '{}' >", message.replace('\'', "'\\''"));
+    // Write message to a NamedTempFile; use `cp <path>` as GIT_EDITOR so
+    // git invokes `cp <path> <editor-file>` — no shell escaping needed.
+    let msg_file = tempfile::Builder::new()
+        .prefix("squire-reword-")
+        .tempfile()
+        .map_err(|e| format!("failed to create temp file: {e}"))?;
+    std::fs::write(msg_file.path(), message)
+        .map_err(|e| format!("failed to write reword message: {e}"))?;
+    let git_editor = format!("cp {}", msg_file.path().display());
     let output = Command::new("git")
         .args(["rebase", "-i", &parent])
         .current_dir(dir)
@@ -303,6 +310,7 @@ pub fn rebase_reword(dir: &Path, commit: &str, message: &str) -> Result<(), Stri
         .env("GIT_EDITOR", &git_editor)
         .output()
         .map_err(|e| format!("failed to run git rebase: {e}"))?;
+    drop(msg_file);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git rebase failed: {stderr}"));
