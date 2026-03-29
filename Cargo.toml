@@ -2,7 +2,7 @@
 publish = false
 name = "squire"
 
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Non-interactive, hunk-addressable git staging CLI for LLMs"
 repository = "https://github.com/tzneal/squire"
