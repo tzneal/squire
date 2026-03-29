@@ -703,7 +703,7 @@ fn status_shows_rebase_in_progress() {
     let output = repo.squire(&["--json", "status"]);
     let status: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert_eq!(status["rebase_in_progress"].as_bool().unwrap(), true);
+    assert!(status["rebase_in_progress"].as_bool().unwrap());
 }
 
 #[test]
@@ -713,7 +713,7 @@ fn status_no_rebase_when_clean() {
     let output = repo.squire(&["--json", "status"]);
     let status: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert_eq!(status["rebase_in_progress"].as_bool().unwrap(), false);
+    assert!(!status["rebase_in_progress"].as_bool().unwrap());
 }
 
 #[test]
@@ -1840,11 +1840,7 @@ fn amend_conflict_returns_structured_error() {
     let err_output = repo.squire_json_err(&["--json", "amend", "--commit", "HEAD~2", id]);
     let parsed: serde_json::Value = serde_json::from_str(&err_output).unwrap();
 
-    assert_eq!(
-        parsed["conflict"].as_bool().unwrap(),
-        true,
-        "parsed: {parsed}"
-    );
+    assert!(parsed["conflict"].as_bool().unwrap(), "parsed: {parsed}");
     let files = parsed["conflicting_files"].as_array().unwrap();
     assert!(!files.is_empty());
     assert_eq!(files[0]["file"].as_str().unwrap(), "f.txt");
@@ -1888,7 +1884,7 @@ fn status_shows_conflicts_during_rebase() {
     let output = repo.squire(&["--json", "status"]);
     let status: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert_eq!(status["rebase_in_progress"].as_bool().unwrap(), true);
+    assert!(status["rebase_in_progress"].as_bool().unwrap());
     let conflicts = status["conflicts"].as_array().unwrap();
     assert!(!conflicts.is_empty());
     assert_eq!(conflicts[0]["file"].as_str().unwrap(), "f.txt");
