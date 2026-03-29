@@ -372,7 +372,11 @@ pub fn select_lines(
         content,
         header: hunk.header.clone(),
         line_hashes,
-        no_newline: hunk.no_newline,
+        no_newline: hunk.no_newline && {
+            // Only propagate if the original final + line is still in the sub-hunk.
+            let last_add = lines.iter().rposition(|l| l.starts_with('+'));
+            last_add.is_some_and(|i| selected_indices.contains(&i))
+        },
     })
 }
 
@@ -855,6 +859,36 @@ index aaa..bbb 100644
         assert!(
             patch.contains("--- a/old_b.txt"),
             "missing old_b.txt in:\n{patch}"
+        );
+    }
+
+    #[test]
+    fn select_lines_no_newline_not_propagated_when_final_add_dropped() {
+        // File has no trailing newline. The last hunk line is `+new2` (no newline).
+        // If we select only the first change pair and drop `+new2`,
+        // the sub-hunk should NOT have no_newline set.
+        let diff = "\
+--- a/f.txt
++++ b/f.txt
+@@ -1,4 +1,4 @@
+ ctx
+-old1
++new1
+-old2
++new2
+\\ No newline at end of file
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert!(hunks[0].no_newline, "source hunk should have no_newline");
+
+        // Select only -old1 and +new1 (indices 1 and 2), dropping -old2 and +new2
+        let h = &hunks[0];
+        let sel = vec![h.line_hashes[1].as_str(), h.line_hashes[2].as_str()];
+        let sub = select_lines(h, &sel, false).unwrap();
+
+        assert!(
+            !sub.no_newline,
+            "sub-hunk should not have no_newline when the final + line was dropped"
         );
     }
 }
