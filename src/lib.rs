@@ -177,6 +177,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             hunk_ids,
         } => {
             let total = stage_hunks_or_cached(dir, hunk_ids)?;
+            let mut amended_target = String::from("HEAD");
             if let Some(rev) = commit {
                 let target = git::rev_parse(dir, rev)?;
                 let head = git::rev_parse(dir, "HEAD")?;
@@ -185,6 +186,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 } else if message.is_some() {
                     return Err("-m cannot be used with --commit for non-HEAD targets".to_string());
                 } else {
+                    amended_target = short_sha(&target).to_string();
                     git::commit_fixup(dir, &target)?;
                     let dirty = !git::is_clean(dir)?;
                     if dirty {
@@ -208,7 +210,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 cli.json,
                 "amended",
                 total,
-                &format!("Amended {total} hunk(s) into HEAD"),
+                &format!("Amended {total} hunk(s) into {amended_target}"),
             );
         }
         Command::Reword { commit, message } => {
