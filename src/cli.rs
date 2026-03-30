@@ -270,7 +270,10 @@ JSON OUTPUT
   log returns an array of commit objects:
     { \"sha\": \"abc1234f...\", \"author\": \"name\",
       \"date\": \"2026-03-15T14:30:00Z\", \"message\": \"feat: ...\",
+      \"refs\": [\"HEAD -> main\", \"origin/main\"],
       \"hunks\": [ { \"id\": \"d3f1a2b0\", ... } ] }
+    The refs array contains branch/tag decorations (omitted when empty).
+    Plain text shows refs in parentheses after the short SHA.
 
   diff/show return an array of hunk objects:
     { \"id\": \"abc12345\", \"file\": \"src/main.rs\",

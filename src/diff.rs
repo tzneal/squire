@@ -387,6 +387,8 @@ pub struct CommitInfo {
     pub author: String,
     pub date: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
     pub hunks: Vec<HunkInfo>,
 }
 
@@ -406,15 +408,23 @@ pub fn parse_log(raw: &str) -> Result<Vec<CommitInfo>, String> {
                 commits.push(ci);
                 diff_buf.clear();
             }
-            let parts: Vec<&str> = line.splitn(4, '\0').collect();
+            let parts: Vec<&str> = line.splitn(5, '\0').collect();
             if parts.len() < 4 {
                 return Err(format!("unexpected log line: {line}"));
             }
+            let refs: Vec<String> = parts
+                .get(4)
+                .unwrap_or(&"")
+                .split(", ")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             current = Some(CommitInfo {
                 sha: parts[0].to_string(),
                 author: parts[1].to_string(),
                 date: parts[2].to_string(),
                 message: parts[3].to_string(),
+                refs,
                 hunks: Vec::new(),
             });
         } else if current.is_some() {

@@ -156,7 +156,7 @@ pub fn log(dir: &Path, n: usize) -> Result<String, String> {
     let output = Command::new("git")
         .args([
             "log",
-            "--format=%H%x00%an%x00%aI%x00%s",
+            "--format=%H%x00%an%x00%aI%x00%s%x00%D",
             "-p",
             &format!("-{n}"),
         ])
