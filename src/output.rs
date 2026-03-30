@@ -13,10 +13,16 @@ pub fn format_log_short(commits: &[CommitInfo]) -> String {
     }
     for c in commits {
         let (add, del) = count_lines(&c.hunks);
+        let refs = if c.refs.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", c.refs.join(", "))
+        };
         writeln!(
             buf,
-            "{}  {}  {} hunk{}  +{}/-{}",
+            "{}{}  {}  {} hunk{}  +{}/-{}",
             short_sha(&c.sha),
+            refs,
             c.message,
             c.hunks.len(),
             if c.hunks.len() == 1 { "" } else { "s" },
@@ -35,7 +41,12 @@ pub fn format_log_plain(commits: &[CommitInfo]) -> String {
         return buf;
     }
     for c in commits {
-        writeln!(buf, "{}  {}", short_sha(&c.sha), c.message).unwrap();
+        let refs = if c.refs.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", c.refs.join(", "))
+        };
+        writeln!(buf, "{}{}  {}", short_sha(&c.sha), refs, c.message).unwrap();
         writeln!(buf, "  {}", c.date).unwrap();
         for hunk in &c.hunks {
             let (add, del) = count_hunk_lines(hunk);
