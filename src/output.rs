@@ -66,7 +66,7 @@ pub fn count_lines(hunks: &[HunkInfo]) -> (usize, usize) {
         .fold((0, 0), |(a, d), (ha, hd)| (a + ha, d + hd))
 }
 
-fn count_hunk_lines(hunk: &HunkInfo) -> (usize, usize) {
+pub fn count_hunk_lines(hunk: &HunkInfo) -> (usize, usize) {
     let mut add = 0;
     let mut del = 0;
     for line in hunk.content.lines() {
