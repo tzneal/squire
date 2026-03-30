@@ -311,11 +311,16 @@ Pass `--json` to get structured output from any command. `diff` and
 The `header` field is present only when the `@@` line includes a
 section header (for example, a function name).
 
-`stage`, `unstage`, and `revert` return a result object:
+`stage`, `unstage`, `revert`, and `stash` return a result object:
 
 ```json
 { "staged": 2, "message": "Staged 2 hunk(s)" }
 ```
+
+When line selectors are used, a `new_hunks` array is included with
+the residual hunks (id, file, ranges, header, line_hashes). This
+avoids needing to re-run `squire diff` after partial line operations.
+The array is omitted when empty.
 
 `status` returns branch info, rebase state, hunks, and line counts.
 The `staged` and `unstaged` arrays contain the same hunk objects as

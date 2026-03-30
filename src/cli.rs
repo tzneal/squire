@@ -254,7 +254,9 @@ BRANCH CLEANUP
 
 IMPORTANT NOTES
   - Hunk IDs change when file content changes. Re-run `squire diff` after
-    any edit or staging operation to get current IDs.
+    any edit or staging operation to get current IDs. (For partial line
+    operations, the new_hunks field in the response provides updated IDs
+    without needing to re-run diff.)
   - Hunk IDs support prefix matching: use any unambiguous prefix.
   - Line hashes are content-based: the same line always gets the same
     hash. Hashes are the shortest unique prefix (min 2 hex chars)
@@ -282,7 +284,11 @@ JSON OUTPUT
   drop returns: { \"dropped\": N, \"message\": \"...\" }
   squash returns: { \"squashed\": N, \"message\": \"...\" }
   stash returns: { \"stashed\": N, \"message\": \"...\" }
-  stage/unstage/revert return: { \"staged\": N, \"message\": \"...\" }
+  stage/unstage/revert/stash return: { \"staged\": N, \"message\": \"...\" }
+    When line selectors are used, a new_hunks array is included with
+    the residual hunks (id, file, old_range, new_range, header,
+    line_hashes). Omitted when empty. This avoids needing to re-run
+    squire diff after partial line operations.
   status returns:
     { \"branch\": \"main\", \"rebase_in_progress\": false,
       \"staged\": [...], \"unstaged\": [...],

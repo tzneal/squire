@@ -2180,3 +2180,112 @@ fn revert_line_selector_invalid_range_order() {
     let err = repo.squire_err(&["stage", &sel]);
     assert!(err.contains("comes after") || err.contains("not found"));
 }
+
+#[test]
+fn stage_partial_json_reports_new_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "ctx1\nold1\nctx2\nold2\nctx3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "ctx1\nnew1\nctx2\nnew2\nctx3\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let line_hashes: Vec<&str> = hunks[0]["line_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    // Stage only the first change pair (-old1, +new1)
+    let selector = format!("{},{}", line_hashes[1], line_hashes[2]);
+    let out = repo.squire(&["--json", "stage", &format!("{id}:{selector}")]);
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+    assert_eq!(result["staged"], 1);
+    let new_hunks = result["new_hunks"].as_array().unwrap();
+    assert_eq!(new_hunks.len(), 1);
+    assert_eq!(new_hunks[0]["file"], "f.txt");
+    assert!(new_hunks[0]["id"].as_str().unwrap().len() == 8);
+    assert!(new_hunks[0]["line_hashes"].as_array().unwrap().len() > 0);
+
+    // The new hunk ID should match what squire diff now reports
+    let remaining = repo.diff_json();
+    assert_eq!(remaining[0]["id"], new_hunks[0]["id"]);
+}
+
+#[test]
+fn stage_full_hunk_no_new_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "old\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "new\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    let out = repo.squire(&["--json", "stage", id]);
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+    assert_eq!(result["staged"], 1);
+    assert!(result.get("new_hunks").is_none());
+}
+
+#[test]
+fn stage_partial_plain_reports_new_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "ctx1\nold1\nctx2\nold2\nctx3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "ctx1\nnew1\nctx2\nnew2\nctx3\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let line_hashes: Vec<&str> = hunks[0]["line_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    let selector = format!("{},{}", line_hashes[1], line_hashes[2]);
+    let out = repo.squire(&["stage", &format!("{id}:{selector}")]);
+
+    assert!(out.contains("new hunk:"));
+    assert!(out.contains("f.txt"));
+}
+
+#[test]
+fn unstage_partial_json_reports_new_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "ctx1\nold1\nctx2\nold2\nctx3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "ctx1\nnew1\nctx2\nnew2\nctx3\n");
+
+    // Stage everything first
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    repo.squire(&["stage", id]);
+
+    // Now get staged hunks and unstage partially
+    let staged_out = repo.squire(&["--json", "diff", "--cached"]);
+    let staged: Vec<serde_json::Value> = serde_json::from_str(&staged_out).unwrap();
+    let staged_id = staged[0]["id"].as_str().unwrap();
+    let line_hashes: Vec<&str> = staged[0]["line_hashes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    let selector = format!("{},{}", line_hashes[1], line_hashes[2]);
+    let out = repo.squire(&["--json", "unstage", &format!("{staged_id}:{selector}")]);
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+    assert_eq!(result["unstaged"], 1);
+    let new_hunks = result["new_hunks"].as_array().unwrap();
+    assert_eq!(new_hunks.len(), 1);
+}
