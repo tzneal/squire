@@ -58,6 +58,21 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
         cleaned.push('\n');
     }
 
+    // Strip binary diff blocks — the `patch` crate panics on
+    // "Binary files ... differ" entries.
+    let cleaned = cleaned
+        .split("diff --git ")
+        .enumerate()
+        .filter(|(i, block)| *i == 0 || !block.contains("\nBinary files "))
+        .map(|(i, block)| {
+            if i == 0 {
+                block.to_string()
+            } else {
+                format!("diff --git {block}")
+            }
+        })
+        .collect::<String>();
+
     let patches =
         Patch::from_multiple(&cleaned).map_err(|e| format!("failed to parse diff: {e}"))?;
     let mut hunks = Vec::new();

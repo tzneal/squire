@@ -282,6 +282,27 @@ fn unstage_single_hunk() {
 }
 
 #[test]
+fn unstage_with_staged_binary_file_does_not_panic() {
+    let repo = TestRepo::with_committed_file("f.txt", "old\n", "new\n");
+
+    // Stage the text change and a binary file together
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    repo.squire(&["stage", id]);
+    let bin_path = repo.path().join("image.bin");
+    std::fs::write(&bin_path, b"\x00\x01\x02\xff").unwrap();
+    repo.git(&["add", "image.bin"]);
+
+    // Unstage the text hunk — git diff --cached now contains a binary
+    // diff block which must not cause a panic.
+    repo.squire(&["unstage", id]);
+
+    // Text change is back in working tree
+    let unstaged = repo.git(&["diff"]);
+    assert!(unstaged.contains("+new"));
+}
+
+#[test]
 fn unstage_subset_of_hunks() {
     let repo =
         TestRepo::with_two_committed_files("a.txt", "aaa\n", "AAA\n", "b.txt", "bbb\n", "BBB\n");
