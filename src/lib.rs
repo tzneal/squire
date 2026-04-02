@@ -28,6 +28,119 @@ fn short_sha(sha: &str) -> &str {
     &sha[..8.min(sha.len())]
 }
 
+/// For files whose contents are fully derived (lockfiles, manifests, generated code),
+/// returns a (strategy, command) pair so the resolver can skip manual conflict resolution.
+fn conflict_strategy(filename: &str) -> Option<(&'static str, &'static str)> {
+    let basename = filename.rsplit('/').next().unwrap_or(filename);
+    let lower = basename.to_ascii_lowercase();
+
+    // Lockfiles — accept incoming, regenerate.
+    match lower.as_str() {
+        "cargo.lock" => {
+            return Some((
+                "accept_incoming_and_relock",
+                "git checkout --theirs Cargo.lock && cargo generate-lockfile",
+            ));
+        }
+        "go.sum" => {
+            return Some((
+                "accept_incoming_and_relock",
+                "git checkout --theirs go.sum && go mod tidy",
+            ));
+        }
+        "package-lock.json" => {
+            return Some((
+                "accept_incoming_and_relock",
+                "git checkout --theirs package-lock.json && npm install",
+            ));
+        }
+        "yarn.lock" => {
+            return Some((
+                "accept_incoming_and_relock",
+                "git checkout --theirs yarn.lock && yarn install",
+            ));
+        }
+        "pnpm-lock.yaml" => {
+            return Some((
+                "accept_incoming_and_relock",
+                "git checkout --theirs pnpm-lock.yaml && pnpm install",
+            ));
+        }
+        "poetry.lock" => {
+            return Some((
+                "accept_incoming_and_relock",
+                "git checkout --theirs poetry.lock && poetry lock",
+            ));
+        }
+        "gemfile.lock" => {
+            return Some((
+                "accept_incoming_and_relock",
+                "git checkout --theirs Gemfile.lock && bundle install",
+            ));
+        }
+        "composer.lock" => {
+            return Some((
+                "accept_incoming_and_relock",
+                "git checkout --theirs composer.lock && composer install",
+            ));
+        }
+        _ => {}
+    }
+
+    // Dependency manifests — keep both sides, relock.
+    match lower.as_str() {
+        "cargo.toml" => {
+            return Some((
+                "keep_both_and_relock",
+                "keep both dependency entries, then cargo generate-lockfile",
+            ));
+        }
+        "go.mod" => {
+            return Some((
+                "keep_both_and_relock",
+                "keep both require/replace entries, then go mod tidy",
+            ));
+        }
+        "package.json" => {
+            return Some((
+                "keep_both_and_relock",
+                "keep both dependency entries, then npm install",
+            ));
+        }
+        "pyproject.toml" => {
+            return Some((
+                "keep_both_and_relock",
+                "keep both dependency entries, then re-run lock command",
+            ));
+        }
+        "gemfile" => {
+            return Some((
+                "keep_both_and_relock",
+                "keep both gem entries, then bundle install",
+            ));
+        }
+        _ => {}
+    }
+
+    // Generated files — accept incoming, regenerate.
+    let lower_full = filename.to_ascii_lowercase();
+    if lower_full.ends_with(".pb.go")
+        || lower_full.ends_with(".pb.rs")
+        || lower_full.ends_with("_generated.go")
+        || lower_full.ends_with("_generated.rs")
+        || lower_full.ends_with(".generated.ts")
+        || lower_full.ends_with(".min.js")
+        || lower_full.ends_with(".min.css")
+    {
+        return Some((
+            "accept_incoming_and_regenerate",
+            "git checkout --theirs <file>, then regenerate",
+        ));
+    }
+
+    None
+}
+
 #[derive(serde::Serialize)]
 struct BranchInfo {
     name: String,
@@ -696,6 +809,173 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 &format!("Stashed {} hunk(s)", selected.len()),
                 &new_hunks,
             );
+        }
+        Command::Rebase { onto } => {
+            let branch = git::branch(dir)?;
+            let rebasing = git::rebase_in_progress(dir)?;
+
+            if rebasing {
+                let conflicts = git::conflicting_files(dir).unwrap_or_default();
+                if cli.json {
+                    let mut val = serde_json::json!({
+                        "state": "rebasing",
+                        "branch": branch,
+                    });
+                    if conflicts.is_empty() {
+                        val["steps"] = serde_json::json!([
+                            "GIT_EDITOR=true git rebase --continue",
+                            "squire rebase",
+                        ]);
+                    } else {
+                        val["conflicts"] = serde_json::json!(
+                            conflicts
+                                .iter()
+                                .map(|(f, s)| {
+                                    let mut c = serde_json::json!({"file": f, "status": s});
+                                    if let Some((strategy, command)) = conflict_strategy(f) {
+                                        c["strategy"] = serde_json::json!(strategy);
+                                        c["command"] = serde_json::json!(command);
+                                    }
+                                    c
+                                })
+                                .collect::<Vec<_>>()
+                        );
+                        val["conflict_rules"] = serde_json::json!({
+                            "imports_includes": "keep both sides, then run a formatter or linter to clean up",
+                            "lockfiles": "take incoming, then re-run the lock command",
+                            "generated_files": "accept incoming, then regenerate",
+                            "non_trivial": "show the diff and ask for guidance",
+                        });
+                        val["steps"] = serde_json::json!([
+                            "resolve conflicts using rules above",
+                            "git add <resolved files>",
+                            "run tests and fix any failures",
+                            "GIT_EDITOR=true git rebase --continue",
+                            "squire rebase",
+                        ]);
+                    }
+                    out.println(
+                        &serde_json::to_string_pretty(&val)
+                            .map_err(|e| format!("failed to serialize JSON: {e}"))?,
+                    );
+                } else if conflicts.is_empty() {
+                    out.println("Rebase in progress, no conflicts.");
+                    out.println("");
+                    out.println("Next steps:");
+                    out.println("  GIT_EDITOR=true git rebase --continue");
+                    out.println("  squire rebase   # check for more conflicts");
+                } else {
+                    out.println(&format!(
+                        "Rebase in progress — {} conflict(s):",
+                        conflicts.len()
+                    ));
+                    for (f, s) in &conflicts {
+                        if let Some((_, command)) = conflict_strategy(f) {
+                            out.println(&format!("  {s}: {f}  → {command}"));
+                        } else {
+                            out.println(&format!("  {s}: {f}"));
+                        }
+                    }
+                    out.println("");
+                    out.println("Conflict resolution rules:");
+                    out.println("  - Imports/includes: keep both sides, then run a formatter or linter to clean up");
+                    out.println("  - Lockfiles: take incoming, then re-run the lock command");
+                    out.println("  - Generated files: accept incoming, then regenerate");
+                    out.println("  - Non-trivial: show the diff and ask for guidance");
+                    out.println("");
+                    out.println("Next steps:");
+                    out.println("  1. Resolve conflicts using rules above");
+                    out.println("  2. git add <resolved files>");
+                    out.println("  3. Run tests and fix any failures");
+                    out.println("  4. GIT_EDITOR=true git rebase --continue");
+                    out.println("  5. squire rebase   # check for more conflicts");
+                }
+                return Ok(out);
+            }
+
+            // Not rebasing — check upstream and print pre-rebase playbook.
+            if !git::is_clean(dir)? {
+                return Err(
+                    "rebase requires a clean working tree; commit or stash changes first"
+                        .to_string(),
+                );
+            }
+            let upstream = if let Some(o) = onto {
+                o.clone()
+            } else {
+                git::upstream_ref(dir)?
+            };
+            let ahead = git::commits_ahead(dir, &upstream)?;
+            let behind = git::commits_behind(dir, &upstream)?;
+
+            if behind == 0 {
+                if cli.json {
+                    out.println(
+                        &serde_json::to_string_pretty(&serde_json::json!({
+                            "state": "up_to_date",
+                            "branch": branch,
+                            "upstream": upstream,
+                            "commits_ahead": ahead,
+                            "commits_behind": 0,
+                        }))
+                        .map_err(|e| format!("failed to serialize JSON: {e}"))?,
+                    );
+                } else if ahead > 0 {
+                    out.println(&format!(
+                        "Branch {branch} is up to date with {upstream} ({ahead} unpushed commit(s))."
+                    ));
+                } else {
+                    out.println(&format!("Branch {branch} is up to date with {upstream}."));
+                }
+                return Ok(out);
+            }
+
+            // Create safety tag.
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let mut tag_name = format!("pre-rebase/{branch}-{secs}");
+            if !git::create_tag(dir, &tag_name)? {
+                // Tag already exists — append a suffix to make it unique.
+                for i in 2.. {
+                    tag_name = format!("pre-rebase/{branch}-{secs}-{i}");
+                    if git::create_tag(dir, &tag_name)? {
+                        break;
+                    }
+                }
+            }
+
+            if cli.json {
+                out.println(
+                    &serde_json::to_string_pretty(&serde_json::json!({
+                        "state": "ready",
+                        "branch": branch,
+                        "upstream": upstream,
+                        "commits_ahead": ahead,
+                        "commits_behind": behind,
+                        "safety_tag": tag_name,
+                        "steps": [
+                            format!("GIT_EDITOR=true git rebase --empty=drop {upstream}"),
+                            "squire rebase   # follow conflict instructions if any",
+                        ],
+                    }))
+                    .map_err(|e| format!("failed to serialize JSON: {e}"))?,
+                );
+            } else {
+                out.println(&format!(
+                    "Branch {branch} ({ahead} commit(s) ahead of {upstream})"
+                ));
+                out.println("");
+                out.println(&format!("Safety tag: {tag_name}"));
+                out.println(&format!("  Recovery: git reset --hard {tag_name}"));
+                out.println("");
+                out.println("Next steps:");
+                out.println(&format!(
+                    "  1. GIT_EDITOR=true git rebase --empty=drop {upstream}"
+                ));
+                out.println("  2. squire rebase   # follow conflict instructions if any");
+            }
         }
     }
     Ok(out)

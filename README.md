@@ -214,6 +214,22 @@ Removes the selected hunks from the working tree and saves them as a
 regular `git stash` entry. Other unstaged changes are preserved. Use
 `git stash pop` to restore — no special squire command needed.
 
+## Rebase
+
+```bash
+squire rebase                        # plain text playbook
+squire rebase --onto origin/main     # override upstream
+squire rebase --json                 # structured output
+```
+
+Prints a contextualized rebase playbook. Inspects the repo state and
+emits step-by-step instructions adapted to where you are: pre-rebase,
+mid-rebase with conflicts, or up-to-date. Creates a safety tag before
+the first rebase for easy recovery.
+
+Use `--onto` to override the upstream ref — for example, to rebase
+onto a different branch than the configured tracking branch.
+
 ## How it works
 
 squire wraps standard git primitives:

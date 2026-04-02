@@ -215,6 +215,21 @@ COMMANDS
       squire stash -m \"wip\" abc12345    # stash with a message
       squire stash abc12345:f3,a1       # stash specific lines
       squire stash abc12345 def67890    # stash multiple hunks
+
+  squire rebase [--onto <ref>]
+    Print a contextualized rebase playbook. Inspects the repo state
+    and emits step-by-step instructions adapted to where you are:
+    - Not rebasing: creates a safety tag, shows the rebase command
+    - Mid-rebase with conflicts: lists conflicts and resolution rules
+    - Mid-rebase without conflicts: shows the continue command
+    - Up to date: reports no rebase needed
+    The safety tag is created automatically on the first run.
+    Use --onto to override the upstream ref (e.g. rebase onto a
+    different branch than the configured upstream).
+      squire rebase                      # plain text playbook
+      squire rebase --onto origin/main   # override upstream
+      squire rebase --json               # structured output
+
 TYPICAL WORKFLOW
   1. squire diff --json                  # discover hunks, line hashes
   2. squire commit -m \"feat: ...\" <id>  # stage and commit in one step
@@ -251,6 +266,17 @@ BRANCH CLEANUP
   3. Review NEEDS_EVALUATION branches — check the commits listed
      to decide if remaining changes are needed
   4. Leave UNMERGED branches alone (or delete with -D if abandoned)
+
+REBASING
+  To rebase the current branch onto its upstream (or a specific branch):
+  1. squire rebase --json                # creates safety tag, shows steps
+     squire rebase --onto main --json    # rebase onto a specific branch
+  2. Run the commands from the steps array directly — do not ask the user
+  3. squire rebase --json                # check state after rebase
+  4. If conflicts: resolve per the conflict_rules in the output, `git add`,
+     run tests, then `GIT_EDITOR=true git rebase --continue`
+  5. Repeat steps 3-4 until rebase completes
+  Recovery: `git reset --hard <safety-tag>` (tag name in step 1 output)
 
 IMPORTANT NOTES
   - Hunk IDs change when file content changes. Re-run `squire diff` after
@@ -312,6 +338,15 @@ JSON OUTPUT
         { \"name\": \"wip\", \"status\": \"unmerged\",
           \"commits\": [{ \"sha\": \"11223344\", \"message\": \"wip\" }] }
       ] }
+
+  rebase returns one of three states:
+    { \"state\": \"ready\", \"branch\": \"feat\", \"upstream\": \"origin/main\",
+      \"commits_ahead\": 3, \"safety_tag\": \"pre-rebase/feat-1743562800\",
+      \"steps\": [\"GIT_EDITOR=true git rebase --empty=drop origin/main\", ...] }
+    { \"state\": \"rebasing\", \"branch\": \"feat\",
+      \"conflicts\": [{\"file\": \"src/main.rs\", \"status\": \"both_modified\"}],
+      \"conflict_rules\": {...}, \"steps\": [...] }
+    { \"state\": \"up_to_date\", \"branch\": \"feat\", \"upstream\": \"origin/main\" }
 
 JSON ERRORS
   When --json is set, errors are also returned as JSON on stdout:
@@ -627,5 +662,23 @@ pub enum Command {
         /// One or more hunk IDs to stash
         #[arg(required = true)]
         hunk_ids: Vec<String>,
+    },
+
+    /// Print a contextualized rebase playbook
+    ///
+    /// Inspects the repo state and prints step-by-step instructions
+    /// for rebasing onto the upstream branch. Creates a safety tag
+    /// before the first rebase. Output adapts to the current state:
+    /// pre-rebase, mid-rebase with conflicts, or up-to-date.
+    ///
+    /// Examples:
+    ///   squire rebase                      # plain text playbook
+    ///   squire rebase --onto origin/main   # override upstream
+    ///   squire rebase --json               # structured output
+    #[command(verbatim_doc_comment)]
+    Rebase {
+        /// Override the upstream ref to rebase onto
+        #[arg(long)]
+        onto: Option<String>,
     },
 }
