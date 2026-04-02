@@ -190,8 +190,23 @@ pub fn reconstruct_patch(hunks: &[&HunkInfo]) -> String {
     let mut current_key: (&str, &str) = ("", "");
     for hunk in &sorted {
         let key = (hunk.old_file.as_str(), hunk.file.as_str());
+        let is_rename =
+            hunk.old_file != hunk.file && hunk.old_file != "/dev/null" && hunk.file != "/dev/null";
         if key != current_key {
             current_key = key;
+            if is_rename {
+                patch.push_str(&format!("diff --git a/{} b/{}\n", hunk.old_file, hunk.file));
+                if hunk.content.is_empty() {
+                    patch.push_str("similarity index 100%\n");
+                }
+                patch.push_str(&format!(
+                    "rename from {}\nrename to {}\n",
+                    hunk.old_file, hunk.file
+                ));
+            }
+            if is_rename && hunk.content.is_empty() {
+                continue;
+            }
             let old_path = if hunk.old_file == "/dev/null" {
                 "/dev/null".to_string()
             } else {
@@ -933,6 +948,79 @@ index aaa..bbb 100644
         assert!(
             patch.contains("--- a/old_b.txt"),
             "missing old_b.txt in:\n{patch}"
+        );
+    }
+
+    #[test]
+    fn reconstruct_patch_rename_only_emits_rename_headers() {
+        let h = HunkInfo {
+            id: "aaaa1111".to_string(),
+            file: "new.txt".to_string(),
+            old_file: "old.txt".to_string(),
+            old_range: "0,0".to_string(),
+            new_range: "0,0".to_string(),
+            content: String::new(),
+            header: Some("rename old.txt -> new.txt".to_string()),
+            line_hashes: Vec::new(),
+            no_newline: false,
+        };
+        let patch = reconstruct_patch(&[&h]);
+        assert!(
+            patch.contains("diff --git a/old.txt b/new.txt"),
+            "missing diff header:\n{patch}"
+        );
+        assert!(
+            patch.contains("rename from old.txt"),
+            "missing rename from:\n{patch}"
+        );
+        assert!(
+            patch.contains("rename to new.txt"),
+            "missing rename to:\n{patch}"
+        );
+        assert!(
+            patch.contains("similarity index 100%"),
+            "missing similarity:\n{patch}"
+        );
+        assert!(!patch.contains("@@"), "should not have @@ line:\n{patch}");
+    }
+
+    #[test]
+    fn reconstruct_patch_rename_with_content_emits_rename_and_hunks() {
+        let h = HunkInfo {
+            id: "bbbb2222".to_string(),
+            file: "new.txt".to_string(),
+            old_file: "old.txt".to_string(),
+            old_range: "1,3".to_string(),
+            new_range: "1,3".to_string(),
+            content: " a\n-b\n+c\n".to_string(),
+            header: None,
+            line_hashes: vec!["aa".to_string(), "bb".to_string(), "cc".to_string()],
+            no_newline: false,
+        };
+        let patch = reconstruct_patch(&[&h]);
+        assert!(
+            patch.contains("diff --git a/old.txt b/new.txt"),
+            "missing diff header:\n{patch}"
+        );
+        assert!(
+            patch.contains("rename from old.txt"),
+            "missing rename from:\n{patch}"
+        );
+        assert!(
+            patch.contains("rename to new.txt"),
+            "missing rename to:\n{patch}"
+        );
+        assert!(
+            patch.contains("--- a/old.txt"),
+            "missing --- line:\n{patch}"
+        );
+        assert!(
+            patch.contains("+++ b/new.txt"),
+            "missing +++ line:\n{patch}"
+        );
+        assert!(
+            patch.contains("@@ -1,3 +1,3 @@"),
+            "missing @@ line:\n{patch}"
         );
     }
 

@@ -394,7 +394,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
             let patch = diff::reconstruct_patch(&refs);
             git::apply_cached(dir, &patch, true)?;
-            git::commit_amend(dir, None)?;
+            git::commit_amend_allow_empty(dir)?;
             if !is_head {
                 git::checkout_head(dir)?;
                 git::rebase_continue(dir).map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
