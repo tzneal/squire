@@ -227,6 +227,12 @@ emits step-by-step instructions adapted to where you are: pre-rebase,
 mid-rebase with conflicts, or up-to-date. Creates a safety tag before
 the first rebase for easy recovery.
 
+When mid-rebase with conflicts, the output includes:
+- `current_commit` — the SHA and message of the commit being replayed
+- `ours_theirs` — clarifies that during rebase, "ours" is the upstream
+  and "theirs" is your commit (the opposite of merge)
+- `step` / `total_steps` — rebase progress (e.g. step 2 of 3)
+
 Use `--onto` to override the upstream ref — for example, to rebase
 onto a different branch than the configured tracking branch.
 
@@ -271,6 +277,11 @@ of forwarding opaque git stderr:
   "conflicting_files": [
     { "file": "src/lib.rs", "status": "both_modified" }
   ],
+  "current_commit": { "sha": "abc1234...", "message": "feat: parser" },
+  "ours_theirs": {
+    "ours": "upstream (origin/main)",
+    "theirs": "your commit being replayed"
+  },
   "hint": "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`."
 }
 ```
@@ -278,8 +289,10 @@ of forwarding opaque git stderr:
 Plain text output:
 
 ```
+Replaying: abc1234f feat: parser
 Conflict during rebase:
   both_modified: src/lib.rs
+Note: "ours" = upstream (origin/main), "theirs" = your commit
 Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`.
 To cancel: `git rebase --abort`.
 ```

@@ -134,16 +134,76 @@ pub fn branch(dir: &Path) -> Result<String, String> {
     .map(|s| s.trim().to_string())
 }
 
+/// Resolve the .git directory path.
+fn git_dir(dir: &Path) -> Result<std::path::PathBuf, String> {
+    let raw =
+        git_cmd(dir, "rev-parse", &["--git-dir".to_string()]).map(|s| s.trim().to_string())?;
+    Ok(if Path::new(&raw).is_absolute() {
+        std::path::PathBuf::from(raw)
+    } else {
+        dir.join(raw)
+    })
+}
+
 /// True if an interactive rebase is in progress.
 pub fn rebase_in_progress(dir: &Path) -> Result<bool, String> {
-    let git_dir =
-        git_cmd(dir, "rev-parse", &["--git-dir".to_string()]).map(|s| s.trim().to_string())?;
-    let git_dir = if Path::new(&git_dir).is_absolute() {
-        std::path::PathBuf::from(git_dir)
-    } else {
-        dir.join(git_dir)
-    };
-    Ok(git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists())
+    let gd = git_dir(dir)?;
+    Ok(gd.join("rebase-merge").exists() || gd.join("rebase-apply").exists())
+}
+
+/// Return the SHA and subject of the commit currently being replayed during a rebase.
+/// Returns None if not mid-rebase or the info isn't available.
+pub fn rebase_current_commit(dir: &Path) -> Option<(String, String)> {
+    let gd = git_dir(dir).ok()?;
+    // rebase-merge/stopped-sha is written when the rebase pauses (conflict or edit).
+    let sha_file = gd.join("rebase-merge/stopped-sha");
+    let sha = std::fs::read_to_string(sha_file).ok()?.trim().to_string();
+    if sha.is_empty() {
+        return None;
+    }
+    let msg = git_cmd(
+        dir,
+        "log",
+        &["--format=%s".to_string(), "-1".to_string(), sha.clone()],
+    )
+    .ok()?
+    .trim()
+    .to_string();
+    Some((sha, msg))
+}
+
+/// Return (current_step, total_steps) for the in-progress rebase.
+pub fn rebase_progress(dir: &Path) -> Option<(usize, usize)> {
+    let gd = git_dir(dir).ok()?;
+    let cur: usize = std::fs::read_to_string(gd.join("rebase-merge/msgnum"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let end: usize = std::fs::read_to_string(gd.join("rebase-merge/end"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some((cur, end))
+}
+
+/// Return the onto ref for the current rebase, if available.
+pub fn rebase_onto(dir: &Path) -> Option<String> {
+    let gd = git_dir(dir).ok()?;
+    let sha = std::fs::read_to_string(gd.join("rebase-merge/onto"))
+        .ok()?
+        .trim()
+        .to_string();
+    if sha.is_empty() {
+        return None;
+    }
+    // Try to resolve to a friendly name.
+    git_cmd(dir, "name-rev", &["--name-only".to_string(), sha.clone()])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "undefined")
+        .or(Some(sha))
 }
 
 /// Return the absolute path to the repository root.
