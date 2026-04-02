@@ -172,7 +172,7 @@ $ squire split def5678
 $ squire diff --json
 $ squire stage <id> && git commit -m "first half"
 $ squire stage <id> && git commit -m "second half"
-$ git rebase --continue           # replay remaining commits
+$ GIT_EDITOR=true git rebase --continue  # replay remaining commits
 ```
 
 ## Edit rebase todo (sequence editor)
@@ -236,7 +236,7 @@ fine non-interactively. For example:
 
 - Stage an entire file → `git add <file>` (no squire needed)
 - Restore a stash → `git stash pop` (no squire needed)
-- Resolve conflicts → `git add` + `git rebase --continue` (no squire needed)
+- Resolve conflicts → `git add` + `GIT_EDITOR=true git rebase --continue` (no squire needed)
 - Abort a rebase → `git rebase --abort` (no squire needed)
 
 squire **detects and reports** conflicts with structured output so an
@@ -255,7 +255,7 @@ of forwarding opaque git stderr:
   "conflicting_files": [
     { "file": "src/lib.rs", "status": "both_modified" }
   ],
-  "hint": "Resolve conflicts, stage with `git add`, then run `git rebase --continue`. To cancel: `git rebase --abort`."
+  "hint": "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`."
 }
 ```
 
@@ -264,7 +264,7 @@ Plain text output:
 ```
 Conflict during rebase:
   both_modified: src/lib.rs
-Resolve conflicts, stage with `git add`, then run `git rebase --continue`.
+Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`.
 To cancel: `git rebase --abort`.
 ```
 
