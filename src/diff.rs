@@ -58,23 +58,37 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
         cleaned.push('\n');
     }
 
-    // Strip binary diff blocks — the `patch` crate panics on
-    // "Binary files ... differ" entries.
-    let cleaned = cleaned
-        .split("diff --git ")
-        .enumerate()
-        .filter(|(i, block)| *i == 0 || !block.contains("\nBinary files "))
-        .map(|(i, block)| {
-            if i == 0 {
-                block.to_string()
-            } else {
-                format!("diff --git {block}")
+    // Split into per-file blocks and extract metadata-only entries
+    // (binary diffs, renames, mode changes) that the `patch` crate
+    // cannot parse.  Synthesize HunkInfo for renames so they remain
+    // visible; drop binary and mode-only blocks silently.
+    let mut metadata_hunks: Vec<HunkInfo> = Vec::new();
+    let mut parseable = String::new();
+    for (i, block) in cleaned.split("diff --git ").enumerate() {
+        if i == 0 {
+            parseable.push_str(block);
+            continue;
+        }
+        if block.contains("\nBinary files ") {
+            continue;
+        }
+        if !block.contains("\n@@ ") {
+            // Metadata-only block (rename, copy, mode change).
+            // Synthesize a HunkInfo for renames so they show up.
+            if let Some(hunk) = parse_metadata_block(block) {
+                metadata_hunks.push(hunk);
             }
-        })
-        .collect::<String>();
+            continue;
+        }
+        parseable.push_str("diff --git ");
+        parseable.push_str(block);
+    }
 
-    let patches =
-        Patch::from_multiple(&cleaned).map_err(|e| format!("failed to parse diff: {e}"))?;
+    let patches = if parseable.trim().is_empty() {
+        Vec::new()
+    } else {
+        Patch::from_multiple(&parseable).map_err(|e| format!("failed to parse diff: {e}"))?
+    };
     let mut hunks = Vec::new();
     for patch in &patches {
         let file = strip_diff_prefix(&patch.new.path);
@@ -100,6 +114,7 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
             });
         }
     }
+    hunks.extend(metadata_hunks);
     Ok(hunks)
 }
 
@@ -111,6 +126,40 @@ fn strip_diff_prefix(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+/// Parse a metadata-only diff block (no `@@` hunks) and synthesize a
+/// [`HunkInfo`] for rename/copy entries so they remain visible.
+/// Returns `None` for mode-change-only or other unrecognised blocks.
+fn parse_metadata_block(block: &str) -> Option<HunkInfo> {
+    let mut rename_from = None;
+    let mut rename_to = None;
+    for line in block.lines() {
+        if let Some(rest) = line.strip_prefix("rename from ") {
+            rename_from = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("rename to ") {
+            rename_to = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("copy from ") {
+            rename_from = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("copy to ") {
+            rename_to = Some(rest.to_string());
+        }
+    }
+    let old = rename_from?;
+    let new = rename_to?;
+    let header = format!("rename {old} -> {new}");
+    let id = hunk_id(&new, "0,0", "");
+    Some(HunkInfo {
+        id,
+        file: new,
+        old_file: old,
+        old_range: "0,0".to_string(),
+        new_range: "0,0".to_string(),
+        content: String::new(),
+        header: Some(header),
+        line_hashes: Vec::new(),
+        no_newline: false,
+    })
 }
 
 /// Reconstruct a valid unified diff patch from selected hunks.
@@ -915,5 +964,44 @@ index aaa..bbb 100644
             !sub.no_newline,
             "sub-hunk should not have no_newline when the final + line was dropped"
         );
+    }
+
+    #[test]
+    fn rename_only_diff_produces_hunk() {
+        let diff = "\
+diff --git a/old.json b/new.json
+similarity index 100%
+rename from old.json
+rename to new.json
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_file, "old.json");
+        assert_eq!(hunks[0].file, "new.json");
+        assert_eq!(hunks[0].old_range, "0,0");
+        assert_eq!(hunks[0].content, "");
+        assert!(hunks[0].header.as_ref().unwrap().contains("rename"));
+    }
+
+    #[test]
+    fn rename_with_content_change_parses_both() {
+        let diff = "\
+diff --git a/old.json b/new.json
+similarity index 80%
+rename from old.json
+rename to new.json
+--- a/old.json
++++ b/new.json
+@@ -1,3 +1,3 @@
+ {
+-  \"key\": \"old\"
++  \"key\": \"new\"
+ }
+";
+        let hunks = parse_diff(diff).unwrap();
+        // The rename has a content hunk, so the patch crate handles it
+        // (the block contains @@). Should parse without panic.
+        assert!(!hunks.is_empty());
+        assert_eq!(hunks[0].file, "new.json");
     }
 }
