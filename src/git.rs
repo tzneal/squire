@@ -517,3 +517,81 @@ pub fn branch_last_commit_date(dir: &Path, branch: &str) -> Result<String, Strin
     )
     .map(|s| s.trim().to_string())
 }
+
+/// Count commits on the current branch ahead of the given upstream ref.
+pub fn commits_ahead(dir: &Path, upstream: &str) -> Result<usize, String> {
+    let raw = git_cmd(
+        dir,
+        "rev-list",
+        &["--count".to_string(), format!("{upstream}..HEAD")],
+    )?;
+    raw.trim()
+        .parse()
+        .map_err(|e| format!("failed to parse commit count: {e}"))
+}
+
+/// Count commits on the upstream not reachable from HEAD.
+pub fn commits_behind(dir: &Path, upstream: &str) -> Result<usize, String> {
+    let raw = git_cmd(
+        dir,
+        "rev-list",
+        &["--count".to_string(), format!("HEAD..{upstream}")],
+    )?;
+    raw.trim()
+        .parse()
+        .map_err(|e| format!("failed to parse commit count: {e}"))
+}
+
+/// Create a lightweight tag. Returns Ok(false) if the tag already exists.
+pub fn create_tag(dir: &Path, name: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["tag", name])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to run git tag: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("already exists") {
+            return Ok(false);
+        }
+        return Err(format!("git tag failed: {stderr}"));
+    }
+    Ok(true)
+}
+
+/// Resolve the upstream tracking ref for the current branch.
+/// Returns e.g. "origin/main". Falls back to origin/{branch} if no
+/// tracking ref is configured but the remote ref exists, then to
+/// the detected master branch (origin/main or origin/master).
+pub fn upstream_ref(dir: &Path) -> Result<String, String> {
+    // Try the configured upstream first.
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to resolve upstream: {e}"))?;
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Ok(s);
+        }
+    }
+    // Fall back to origin/{branch} if that ref exists.
+    let current = branch(dir)?;
+    let candidate = format!("origin/{current}");
+    if is_ref(dir, &candidate) {
+        return Ok(candidate);
+    }
+    // Fall back to the master branch.
+    let has_remote = fetch(dir)?;
+    let master = detect_master_branch(dir, has_remote)?;
+    let master_ref = if has_remote {
+        format!("origin/{master}")
+    } else {
+        master
+    };
+    if is_ref(dir, &master_ref) {
+        return Ok(master_ref);
+    }
+    Err("no upstream ref found (set one with `git branch --set-upstream-to`)".to_string())
+}
