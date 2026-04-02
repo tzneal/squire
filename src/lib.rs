@@ -822,11 +822,27 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
 
             if rebasing {
                 let conflicts = git::conflicting_files(dir).unwrap_or_default();
+                let current_commit = git::rebase_current_commit(dir);
+                let onto = git::rebase_onto(dir);
+                let progress = git::rebase_progress(dir);
                 if cli.json {
                     let mut val = serde_json::json!({
                         "state": "rebasing",
                         "branch": branch,
                     });
+                    if let Some((cur, end)) = progress {
+                        val["step"] = serde_json::json!(cur);
+                        val["total_steps"] = serde_json::json!(end);
+                    }
+                    if let Some((sha, msg)) = &current_commit {
+                        val["current_commit"] = serde_json::json!({"sha": sha, "message": msg});
+                    }
+                    if let Some(ref o) = onto {
+                        val["ours_theirs"] = serde_json::json!({
+                            "ours": format!("upstream ({o}) — the base you are rebasing onto"),
+                            "theirs": format!("your commit being replayed from {branch}"),
+                        });
+                    }
                     if conflicts.is_empty() {
                         val["steps"] = serde_json::json!([
                             "GIT_EDITOR=true git rebase --continue",
@@ -871,6 +887,17 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                     out.println("  GIT_EDITOR=true git rebase --continue");
                     out.println("  squire rebase   # check for more conflicts");
                 } else {
+                    if let Some((cur, end)) = progress {
+                        out.println(&format!("Step {cur} of {end}"));
+                    }
+                    if let Some((sha, msg)) = &current_commit {
+                        out.println(&format!("Replaying: {sha:.8} {msg}"));
+                    }
+                    if let Some(ref o) = onto {
+                        out.println(&format!(
+                            "Note: during rebase, \"ours\" = upstream ({o}), \"theirs\" = your commit from {branch}"
+                        ));
+                    }
                     out.println(&format!(
                         "Rebase in progress — {} conflict(s):",
                         conflicts.len()
@@ -1054,25 +1081,45 @@ fn check_rebase_conflict(dir: &Path, err: String, json: bool) -> String {
         && let Ok(files) = git::conflicting_files(dir)
         && !files.is_empty()
     {
+        let current_commit = git::rebase_current_commit(dir);
+        let onto = git::rebase_onto(dir);
         if json {
             let file_list: Vec<serde_json::Value> = files
                 .iter()
                 .map(|(f, s)| serde_json::json!({"file": f, "status": s}))
                 .collect();
-            return serde_json::json!({
+            let mut val = serde_json::json!({
                 "conflict": true,
                 "conflicting_files": file_list,
                 "hint": "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`."
-            })
-            .to_string();
+            });
+            if let Some((sha, msg)) = &current_commit {
+                val["current_commit"] = serde_json::json!({"sha": sha, "message": msg});
+            }
+            if let Some(ref o) = onto {
+                val["ours_theirs"] = serde_json::json!({
+                    "ours": format!("upstream ({o})"),
+                    "theirs": "your commit being replayed",
+                });
+            }
+            return val.to_string();
         }
-        let mut msg = String::from("Conflict during rebase:\n");
+        let mut msg = String::new();
+        if let Some((sha, subject)) = &current_commit {
+            msg.push_str(&format!("Replaying: {sha:.8} {subject}\n"));
+        }
+        msg.push_str("Conflict during rebase:\n");
         for (f, s) in &files {
             if let Some((_, command)) = conflict_strategy(f) {
                 msg.push_str(&format!("  {s}: {f}  → {command}\n"));
             } else {
                 msg.push_str(&format!("  {s}: {f}\n"));
             }
+        }
+        if let Some(ref o) = onto {
+            msg.push_str(&format!(
+                "Note: \"ours\" = upstream ({o}), \"theirs\" = your commit\n"
+            ));
         }
         msg.push_str("Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`.");
         return msg;

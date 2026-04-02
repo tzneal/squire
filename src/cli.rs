@@ -344,9 +344,18 @@ JSON OUTPUT
       \"commits_ahead\": 3, \"safety_tag\": \"pre-rebase/feat-1743562800\",
       \"steps\": [\"GIT_EDITOR=true git rebase --empty=drop origin/main\", ...] }
     { \"state\": \"rebasing\", \"branch\": \"feat\",
+      \"step\": 2, \"total_steps\": 3,
+      \"current_commit\": {\"sha\": \"abc1234...\", \"message\": \"feat: parser\"},
+      \"ours_theirs\": {\"ours\": \"upstream (...) — the base you are rebasing onto\",
+                       \"theirs\": \"your commit being replayed from feat\"},
       \"conflicts\": [{\"file\": \"src/main.rs\", \"status\": \"both_modified\"}],
       \"conflict_rules\": {...}, \"steps\": [...] }
     { \"state\": \"up_to_date\", \"branch\": \"feat\", \"upstream\": \"origin/main\" }
+    The rebasing state includes:
+      step/total_steps — rebase progress (e.g. step 2 of 3)
+      current_commit — the commit being replayed (sha + message)
+      ours_theirs — during rebase, \"ours\" is the upstream (not your code!)
+                    and \"theirs\" is your commit. This is the opposite of merge.
 
 JSON ERRORS
   When --json is set, errors are also returned as JSON on stdout:
