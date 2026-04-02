@@ -240,8 +240,8 @@ SPLITTING A COMMIT
   5. squire diff --json                   # re-check what's left
   6. squire commit -m \"fix: ...\" <id3>  # commit second group
   Repeat steps 4-5 until all changes are committed.
-  If the target was not HEAD, run `git rebase --continue` to replay
-  the remaining commits.
+  If the target was not HEAD, run `GIT_EDITOR=true git rebase --continue`
+  to replay the remaining commits non-interactively.
 
 BRANCH CLEANUP
   To identify and clean up stale local branches:
@@ -521,8 +521,8 @@ pub enum Command {
     /// For older commits: runs a non-interactive rebase to pause at
     /// the commit, then resets it.
     ///
-    /// After splitting, use `git rebase --continue` to replay
-    /// remaining commits (if the target was not HEAD).
+    /// After splitting, use `GIT_EDITOR=true git rebase --continue` to replay
+    /// remaining commits non-interactively (if the target was not HEAD).
     ///
     /// Examples:
     ///   squire split abc1234               # split a commit

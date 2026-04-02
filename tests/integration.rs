@@ -1869,7 +1869,7 @@ fn amend_conflict_returns_structured_error() {
         parsed["hint"]
             .as_str()
             .unwrap()
-            .contains("git rebase --continue")
+            .contains("GIT_EDITOR=true git rebase --continue")
     );
 
     // Clean up the paused rebase
@@ -1951,7 +1951,7 @@ fn status_plain_shows_conflicts() {
     let output = repo.squire(&["status"]);
     assert!(output.contains("Conflicts"));
     assert!(output.contains("f.txt"));
-    assert!(output.contains("git rebase --continue"));
+    assert!(output.contains("GIT_EDITOR=true git rebase --continue"));
 
     repo.git(&["rebase", "--abort"]);
 }
@@ -2309,4 +2309,335 @@ fn unstage_partial_json_reports_new_hunks() {
     assert_eq!(result["unstaged"], 1);
     let new_hunks = result["new_hunks"].as_array().unwrap();
     assert_eq!(new_hunks.len(), 1);
+}
+
+#[test]
+fn rebase_no_upstream_returns_error() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    // Rename the only branch so there's no main/master to fall back to.
+    repo.git(&["branch", "-m", "main", "dev"]);
+
+    let err = repo.squire_err(&["rebase"]);
+    assert!(
+        err.contains("no upstream") || err.contains("cannot detect master"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rebase_dirty_working_tree_fails() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "dirty\n");
+
+    let err = repo.squire_err(&["rebase"]);
+    assert!(err.contains("clean working tree"), "got: {err}");
+}
+
+#[test]
+fn rebase_up_to_date_json() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Create a fake upstream by making a second branch and pointing origin/main at it.
+    repo.git(&["branch", "upstream"]);
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "up_to_date");
+    assert_eq!(val["branch"], "main");
+    assert_eq!(val["commits_ahead"], 0);
+}
+
+#[test]
+fn rebase_falls_back_to_master_branch() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Switch to a feature branch with no tracking ref.
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "feature commit"]);
+
+    // Advance main so feature is actually behind.
+    repo.git(&["checkout", "main"]);
+    repo.write_file("g.txt", "main-only\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "main advance"]);
+    repo.git(&["checkout", "feature"]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "ready");
+    assert_eq!(val["branch"], "feature");
+    // Should have fallen back to local main since there's no remote.
+    assert_eq!(val["upstream"], "main");
+    assert_eq!(val["commits_ahead"], 1);
+}
+
+#[test]
+fn rebase_ready_creates_tag_and_shows_steps() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Set up origin/main pointing at init.
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    // Advance origin/main with a commit the local branch doesn't have.
+    repo.write_file("g.txt", "origin\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "origin-only"]);
+    let origin_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &origin_sha]);
+
+    // Reset local main back and add a different commit.
+    repo.git(&["reset", "--hard", "HEAD~1"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "ready");
+    assert_eq!(val["commits_ahead"], 1);
+    let tag = val["safety_tag"].as_str().unwrap();
+    assert!(tag.starts_with("pre-rebase/main-"), "tag: {tag}");
+
+    // Verify the tag actually exists.
+    let tag_check = repo.git(&["rev-parse", "--verify", tag]);
+    assert!(!tag_check.trim().is_empty());
+
+    // Steps should mention the upstream.
+    let steps = val["steps"].as_array().unwrap();
+    assert!(steps[0].as_str().unwrap().contains("rebase"));
+}
+
+#[test]
+fn rebase_ready_plain_text() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    // Advance origin/main independently.
+    repo.write_file("g.txt", "origin\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "origin-only"]);
+    let origin_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &origin_sha]);
+
+    // Reset local main back and add a different commit.
+    repo.git(&["reset", "--hard", "HEAD~1"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    let out = repo.squire(&["rebase"]);
+    assert!(out.contains("Safety tag:"), "got: {out}");
+    assert!(out.contains("pre-rebase/main-"), "got: {out}");
+    assert!(out.contains("1 commit(s) ahead"), "got: {out}");
+    assert!(out.contains("git rebase --empty=drop"), "got: {out}");
+}
+
+#[test]
+fn rebase_during_conflict_shows_conflicts() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("f.txt", "first\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+
+    repo.write_file("f.txt", "second\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    // Trigger a conflict via amend into older commit.
+    repo.write_file("f.txt", "conflict\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~1", id]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "rebasing");
+    let conflicts = val["conflicts"].as_array().unwrap();
+    assert!(!conflicts.is_empty());
+    assert!(val["conflict_rules"].is_object());
+    assert!(val["steps"].is_array());
+
+    repo.git(&["rebase", "--abort"]);
+}
+
+#[test]
+fn rebase_during_rebase_no_conflicts() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "line1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+    repo.write_file("f.txt", "line2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+    repo.write_file("f.txt", "line3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    // Split middle commit to get into a rebase state without conflicts.
+    let second = repo.git(&["rev-parse", "HEAD~1"]);
+    repo.squire(&["split", second.trim()]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "rebasing");
+    assert!(val.get("conflicts").is_none());
+    let steps = val["steps"].as_array().unwrap();
+    assert!(steps[0].as_str().unwrap().contains("rebase --continue"));
+
+    repo.git(&["rebase", "--abort"]);
+}
+
+#[test]
+fn rebase_ready_json_includes_commits_behind() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    // Advance origin/main.
+    repo.write_file("g.txt", "origin\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "origin-only"]);
+    let origin_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &origin_sha]);
+
+    // Reset local and diverge.
+    repo.git(&["reset", "--hard", "HEAD~1"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "local"]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "ready");
+    assert_eq!(
+        val["commits_behind"], 1,
+        "ready state should include commits_behind"
+    );
+}
+
+#[test]
+fn rebase_up_to_date_json_includes_commits_behind() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["branch", "upstream"]);
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "up_to_date");
+    assert_eq!(
+        val["commits_behind"], 0,
+        "up_to_date state should include commits_behind"
+    );
+}
+
+#[test]
+fn rebase_ready_deduplicates_safety_tag() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    // Advance origin/main.
+    repo.write_file("g.txt", "origin\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "origin-only"]);
+    let origin_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &origin_sha]);
+
+    // Reset local and diverge.
+    repo.git(&["reset", "--hard", "HEAD~1"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "local"]);
+
+    let out1 = repo.squire(&["--json", "rebase"]);
+    let val1: serde_json::Value = serde_json::from_str(&out1).unwrap();
+    let tag1 = val1["safety_tag"].as_str().unwrap().to_string();
+
+    // Run again immediately — same epoch second likely, tag already exists.
+    let out2 = repo.squire(&["--json", "rebase"]);
+    let val2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+    let tag2 = val2["safety_tag"].as_str().unwrap().to_string();
+
+    // Tags should differ since the first one already existed.
+    assert_ne!(tag1, tag2, "second invocation should create a distinct tag");
+
+    // Both tags should exist.
+    repo.git(&["rev-parse", "--verify", &tag1]);
+    repo.git(&["rev-parse", "--verify", &tag2]);
+}
+
+#[test]
+fn amend_conflict_plain_text_is_not_json() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("f.txt", "first\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+
+    repo.write_file("f.txt", "second\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    repo.write_file("f.txt", "third\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    // Create a conflicting change and amend without --json.
+    repo.write_file("f.txt", "conflict\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    let err = repo.squire_err(&["amend", "--commit", "HEAD~2", id]);
+    // The error should NOT be raw JSON when --json wasn't passed.
+    assert!(
+        !err.starts_with('{'),
+        "plain-text error should not be JSON, got: {err}"
+    );
+    assert!(
+        err.contains("f.txt"),
+        "error should mention the conflicting file, got: {err}"
+    );
+
+    repo.git(&["rebase", "--abort"]);
 }

@@ -218,7 +218,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                         if dirty {
                             let _ = git::stash_pop(dir);
                         }
-                        return Err(check_rebase_conflict(dir, e));
+                        return Err(check_rebase_conflict(dir, e, cli.json));
                     }
                     if dirty {
                         git::stash_pop(dir)?;
@@ -245,7 +245,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 return Err("reword requires a clean working tree for non-HEAD commits".to_string());
             } else {
                 git::rebase_reword(dir, &target, message)
-                    .map_err(|e| check_rebase_conflict(dir, e))?;
+                    .map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
             }
             if cli.json {
                 out.println(
@@ -265,7 +265,8 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                         "drop requires a clean working tree for non-HEAD commits".to_string()
                     );
                 }
-                git::rebase_edit(dir, &target).map_err(|e| check_rebase_conflict(dir, e))?;
+                git::rebase_edit(dir, &target)
+                    .map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
             }
             // After rebase_edit, the target is now HEAD
             let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
@@ -277,7 +278,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             git::commit_amend(dir, None)?;
             if !is_head {
                 git::checkout_head(dir)?;
-                git::rebase_continue(dir).map_err(|e| check_rebase_conflict(dir, e))?;
+                git::rebase_continue(dir).map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
             }
             emit_result(
                 &mut out,
@@ -345,7 +346,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                     for (f, s) in &conflicts {
                         out.println(&format!("  {s}: {f}"));
                     }
-                    out.println("Resolve conflicts, stage with `git add`, then run `git rebase --continue`.");
+                    out.println("Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`.");
                     out.println("To cancel: `git rebase --abort`.");
                 }
                 let clean = staged.is_empty() && unstaged.is_empty();
@@ -570,7 +571,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
                 .map(|c| git::rev_parse(dir, c))
                 .collect::<Result<_, _>>()?;
             git::rebase_squash(dir, &target, &sources)
-                .map_err(|e| check_rebase_conflict(dir, e))?;
+                .map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
             if let Some(msg) = message {
                 git::commit_amend(dir, Some(msg))?;
             }
@@ -762,21 +763,33 @@ fn print_hunks(
 
 /// Check if a rebase error is actually a conflict, and if so, return a
 /// structured error message that includes the conflicting files.
-fn check_rebase_conflict(dir: &Path, err: String) -> String {
+fn check_rebase_conflict(dir: &Path, err: String, json: bool) -> String {
     if let Ok(true) = git::rebase_in_progress(dir)
         && let Ok(files) = git::conflicting_files(dir)
         && !files.is_empty()
     {
-        let file_list: Vec<serde_json::Value> = files
-            .iter()
-            .map(|(f, s)| serde_json::json!({"file": f, "status": s}))
-            .collect();
-        return serde_json::json!({
-            "conflict": true,
-            "conflicting_files": file_list,
-            "hint": "Resolve conflicts, stage with `git add`, then run `git rebase --continue`. To cancel: `git rebase --abort`."
-        })
-        .to_string();
+        if json {
+            let file_list: Vec<serde_json::Value> = files
+                .iter()
+                .map(|(f, s)| serde_json::json!({"file": f, "status": s}))
+                .collect();
+            return serde_json::json!({
+                "conflict": true,
+                "conflicting_files": file_list,
+                "hint": "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`."
+            })
+            .to_string();
+        }
+        let mut msg = String::from("Conflict during rebase:\n");
+        for (f, s) in &files {
+            if let Some((_, command)) = conflict_strategy(f) {
+                msg.push_str(&format!("  {s}: {f}  → {command}\n"));
+            } else {
+                msg.push_str(&format!("  {s}: {f}\n"));
+            }
+        }
+        msg.push_str("Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`.");
+        return msg;
     }
     err
 }

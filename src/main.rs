@@ -21,33 +21,12 @@ fn main() {
             print!("{}", out.stdout);
         }
         Err(e) => {
-            if e.starts_with('{') {
-                // Structured error (e.g. conflict report) — format appropriately.
-                if cli.json {
+            if cli.json {
+                if e.starts_with('{') {
                     println!("{e}");
-                } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&e) {
-                    if v["conflict"].as_bool() == Some(true) {
-                        eprintln!("Conflict during rebase:");
-                        if let Some(files) = v["conflicting_files"].as_array() {
-                            for f in files {
-                                eprintln!(
-                                    "  {}: {}",
-                                    f["status"].as_str().unwrap_or("unknown"),
-                                    f["file"].as_str().unwrap_or("?")
-                                );
-                            }
-                        }
-                        if let Some(hint) = v["hint"].as_str() {
-                            eprintln!("{hint}");
-                        }
-                    } else {
-                        eprintln!("error: {e}");
-                    }
                 } else {
-                    eprintln!("error: {e}");
+                    println!("{}", serde_json::json!({ "error": e }));
                 }
-            } else if cli.json {
-                println!("{}", serde_json::json!({ "error": e }));
             } else {
                 eprintln!("error: {e}");
             }
