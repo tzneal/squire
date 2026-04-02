@@ -2664,3 +2664,700 @@ fn amend_conflict_plain_text_is_not_json() {
 
     repo.git(&["rebase", "--abort"]);
 }
+
+// ── Rename / add / delete support ──────────────────────────────────────────
+
+#[test]
+fn diff_cached_rename_only_shows_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+
+    let out = repo.squire(&["--json", "diff", "--cached"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let arr = hunks.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["old_file"].as_str().unwrap(), "old.txt");
+    assert_eq!(arr[0]["file"].as_str().unwrap(), "new.txt");
+    assert!(arr[0]["header"].as_str().unwrap().contains("rename"));
+}
+
+#[test]
+fn diff_ref_rename_only_shows_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.git(&["commit", "-m", "rename"]);
+
+    let out = repo.squire(&["--json", "diff", "HEAD~1", "HEAD"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let arr = hunks.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["old_file"].as_str().unwrap(), "old.txt");
+    assert_eq!(arr[0]["file"].as_str().unwrap(), "new.txt");
+}
+
+#[test]
+fn log_rename_only_commit_shows_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.git(&["commit", "-m", "rename"]);
+
+    let out = repo.squire(&["--json", "log", "-n", "1"]);
+    let commits: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let hunks = commits[0]["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 1);
+    assert_eq!(hunks[0]["old_file"].as_str().unwrap(), "old.txt");
+    assert_eq!(hunks[0]["file"].as_str().unwrap(), "new.txt");
+}
+
+#[test]
+fn stage_rename_only_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    // Perform rename in the working tree (delete + create)
+    // then tell git about it so it detects the rename
+    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt"));
+
+    let hunks = repo.diff_json();
+    let arr = hunks.as_array().unwrap();
+    // Should see a delete hunk and an untracked new file hunk
+    assert!(arr.len() >= 1, "expected hunks, got: {hunks}");
+
+    // Stage all hunks
+    let ids: Vec<String> = arr
+        .iter()
+        .map(|h| h["id"].as_str().unwrap().to_string())
+        .collect();
+    let args: Vec<&str> = std::iter::once("stage")
+        .chain(ids.iter().map(|s| s.as_str()))
+        .collect();
+    repo.squire(&args);
+
+    // After staging, git should see the rename
+    let status = repo.git(&["status", "--porcelain"]);
+    // Either "R  old.txt -> new.txt" or "D old.txt" + "A new.txt"
+    assert!(
+        status.contains("new.txt"),
+        "new.txt should be staged, got: {status}"
+    );
+}
+
+#[test]
+fn drop_rename_only_hunk_from_head() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.git(&["commit", "-m", "rename"]);
+
+    // Get the rename hunk ID from the commit
+    let out = repo.squire(&["--json", "diff", "HEAD~1", "HEAD"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    // Drop the rename hunk — should undo the rename in the commit
+    repo.squire(&["drop", "HEAD", id]);
+
+    // The commit should no longer contain the rename
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(
+        !show.contains("old.txt") && !show.contains("new.txt"),
+        "rename should be dropped from commit, got: {show}"
+    );
+}
+
+#[test]
+fn amend_rename_into_head() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("old.txt", "changed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "modify"]);
+
+    // Now rename in working tree
+    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt"));
+
+    let hunks = repo.diff_json();
+    let ids: Vec<String> = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap().to_string())
+        .collect();
+    let mut args: Vec<&str> = vec!["amend"];
+    for id in &ids {
+        args.push(id);
+    }
+    repo.squire(&args);
+
+    // After amend, HEAD should contain the rename
+    let status = repo.git(&["status", "--porcelain"]);
+    assert!(
+        status.trim().is_empty(),
+        "working tree should be clean: {status}"
+    );
+    assert!(repo.path().join("new.txt").exists());
+    assert!(!repo.path().join("old.txt").exists());
+}
+
+#[test]
+fn commit_staged_rename_only() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+
+    // The rename is already staged; squire commit should handle it
+    let hunks_out = repo.squire(&["--json", "diff", "--cached"]);
+    let hunks: serde_json::Value = serde_json::from_str(&hunks_out).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    repo.squire(&["commit", "-m", "rename file", id]);
+
+    let log = repo.git(&["log", "--oneline", "-1"]);
+    assert!(log.contains("rename file"));
+    assert!(repo.path().join("new.txt").exists());
+    assert!(!repo.path().join("old.txt").exists());
+}
+
+#[test]
+fn unstage_rename_only_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+
+    // Rename is staged; get its hunk ID
+    let out = repo.squire(&["--json", "diff", "--cached"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    // Unstage the rename
+    repo.squire(&["unstage", id]);
+
+    // After unstage, the index should match HEAD (old.txt exists)
+    let cached = repo.squire(&["--json", "diff", "--cached"]);
+    let cached_hunks: serde_json::Value = serde_json::from_str(&cached).unwrap();
+    assert!(
+        cached_hunks.as_array().unwrap().is_empty(),
+        "nothing should be staged after unstage"
+    );
+}
+
+#[test]
+fn revert_staged_rename_only_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+
+    let out = repo.squire(&["--json", "diff", "--cached"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    // Revert the rename — should restore old.txt in both index and worktree
+    repo.squire(&["revert", id]);
+
+    assert!(repo.path().join("old.txt").exists());
+    let status = repo.git(&["status", "--porcelain"]);
+    // new.txt may remain as untracked, but old.txt should be restored
+    assert!(
+        !status.contains("D  old.txt") && !status.contains("D old.txt"),
+        "old.txt should not be deleted, got: {status}"
+    );
+}
+
+#[test]
+fn drop_rename_only_hunk_from_older_commit() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.git(&["commit", "-m", "rename"]);
+    repo.write_file("other.txt", "stuff\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+
+    let out = repo.squire(&["--json", "diff", "HEAD~2", "HEAD~1"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    // Drop the rename from the older commit
+    repo.squire(&["drop", "HEAD~1", id]);
+
+    // The rename commit should now be empty (or gone)
+    // old.txt should exist in the tree at HEAD
+    let content = repo.git(&["show", "HEAD:old.txt"]);
+    assert_eq!(content, "hello\n");
+}
+
+#[test]
+fn amend_content_into_commit_with_rename() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.write_file("b.txt", "world\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    // Commit that renames + modifies another file
+    repo.git(&["mv", "a.txt", "a_renamed.txt"]);
+    repo.write_file("b.txt", "changed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "rename and modify"]);
+    repo.write_file("c.txt", "extra\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+
+    // Now amend a new change into HEAD
+    repo.write_file("c.txt", "extra updated\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    repo.squire(&["amend", id]);
+
+    // The rename from the earlier commit should still be intact
+    assert!(repo.path().join("a_renamed.txt").exists());
+    assert!(!repo.path().join("a.txt").exists());
+}
+
+#[test]
+fn stash_file_deletion_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.write_file("b.txt", "world\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    std::fs::remove_file(repo.path().join("a.txt")).unwrap();
+
+    let hunks = repo.diff_json();
+    let del_hunk = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "/dev/null")
+        .expect("should have a deletion hunk");
+    let id = del_hunk["id"].as_str().unwrap();
+
+    repo.squire(&["stash", id]);
+
+    // After stash, a.txt should be restored in the working tree
+    assert!(
+        repo.path().join("a.txt").exists(),
+        "a.txt should be restored after stashing the deletion"
+    );
+
+    // Pop the stash — a.txt should be deleted again
+    repo.git(&["stash", "pop"]);
+    assert!(!repo.path().join("a.txt").exists());
+}
+
+#[test]
+fn stash_new_file_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("existing.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("new.txt", "brand new\n");
+
+    let hunks = repo.diff_json();
+    let new_hunk = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["old_file"].as_str().unwrap() == "/dev/null")
+        .expect("should have a new-file hunk");
+    let id = new_hunk["id"].as_str().unwrap();
+
+    repo.squire(&["stash", id]);
+
+    // After stash, new.txt should be gone from working tree
+    assert!(
+        !repo.path().join("new.txt").exists(),
+        "new.txt should be removed after stashing"
+    );
+
+    // Pop the stash — new.txt should reappear
+    repo.git(&["stash", "pop"]);
+    assert!(repo.path().join("new.txt").exists());
+}
+
+#[test]
+fn revert_file_deletion_restores_file() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    std::fs::remove_file(repo.path().join("a.txt")).unwrap();
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    repo.squire(&["revert", id]);
+
+    assert!(repo.path().join("a.txt").exists());
+    let content = std::fs::read_to_string(repo.path().join("a.txt")).unwrap();
+    assert_eq!(content, "hello\n");
+}
+
+#[test]
+fn commit_file_deletion() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.write_file("b.txt", "world\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    std::fs::remove_file(repo.path().join("a.txt")).unwrap();
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    repo.squire(&["commit", "-m", "delete a", id]);
+
+    let log = repo.git(&["log", "--oneline", "-1"]);
+    assert!(log.contains("delete a"));
+    // Verify the file is actually deleted in the commit
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(show.contains("a.txt"));
+}
+
+#[test]
+fn drop_file_deletion_from_head() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.write_file("b.txt", "world\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["rm", "a.txt"]);
+    repo.write_file("b.txt", "changed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "delete and modify"]);
+
+    let out = repo.squire(&["--json", "diff", "HEAD~1", "HEAD"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let del_hunk = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "/dev/null")
+        .expect("should have deletion hunk");
+    let id = del_hunk["id"].as_str().unwrap();
+
+    repo.squire(&["drop", "HEAD", id]);
+
+    // The deletion should be removed from the commit
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(
+        !show.contains("a.txt"),
+        "a.txt deletion should be dropped from commit, got: {show}"
+    );
+    // b.txt modification should still be there
+    assert!(show.contains("b.txt"));
+    // a.txt should still exist in the commit tree
+    let a_content = repo.git(&["show", "HEAD:a.txt"]);
+    assert_eq!(a_content, "hello\n");
+}
+
+#[test]
+fn drop_new_file_from_head() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("b.txt", "new file\n");
+    repo.write_file("a.txt", "changed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add b and modify a"]);
+
+    let out = repo.squire(&["--json", "diff", "HEAD~1", "HEAD"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let new_hunk = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["old_file"].as_str().unwrap() == "/dev/null")
+        .expect("should have new-file hunk");
+    let id = new_hunk["id"].as_str().unwrap();
+
+    repo.squire(&["drop", "HEAD", id]);
+
+    // b.txt should not be in the commit
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(!show.contains("b.txt"), "b.txt should be dropped: {show}");
+    assert!(show.contains("a.txt"));
+}
+
+#[test]
+fn squash_commits_with_rename() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "a.txt", "b.txt"]);
+    repo.git(&["commit", "-m", "rename"]);
+    repo.write_file("b.txt", "changed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "modify"]);
+
+    // Squash the modify commit into the rename commit
+    repo.squire(&["squash", "HEAD~1", "HEAD"]);
+
+    // Should have 2 commits: init + squashed
+    let log = repo.git(&["log", "--oneline"]);
+    let lines: Vec<&str> = log.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 commits, got: {log}");
+    // b.txt should exist with changed content
+    let content = std::fs::read_to_string(repo.path().join("b.txt")).unwrap();
+    assert_eq!(content, "changed\n");
+    assert!(!repo.path().join("a.txt").exists());
+}
+
+#[test]
+fn split_commit_with_rename() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.write_file("b.txt", "world\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "a.txt", "a_renamed.txt"]);
+    repo.write_file("b.txt", "changed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "rename and modify"]);
+
+    repo.squire(&["split", "HEAD"]);
+
+    // After split, changes should be unstaged
+    let hunks = repo.diff_json();
+    let arr = hunks.as_array().unwrap();
+    // Should see the rename (as delete + add) and the b.txt modification
+    assert!(
+        arr.len() >= 2,
+        "expected at least 2 hunks after split, got: {hunks}"
+    );
+}
+
+#[test]
+fn show_rename_only_hunk_from_commit() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.git(&["commit", "-m", "rename"]);
+
+    // Get the hunk ID from log
+    let log_out = repo.squire(&["--json", "log", "-n", "1"]);
+    let commits: serde_json::Value = serde_json::from_str(&log_out).unwrap();
+    let id = commits[0]["hunks"][0]["id"].as_str().unwrap();
+
+    // Show the hunk from the commit
+    let out = repo.squire(&["--json", "show", "HEAD", id]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let arr = hunks.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["old_file"].as_str().unwrap(), "old.txt");
+    assert_eq!(arr[0]["file"].as_str().unwrap(), "new.txt");
+}
+
+#[test]
+fn status_shows_staged_rename() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+
+    let out = repo.squire(&["--json", "status"]);
+    let status: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let staged = status["staged"].as_array().unwrap();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(staged[0]["old_file"].as_str().unwrap(), "old.txt");
+    assert_eq!(staged[0]["file"].as_str().unwrap(), "new.txt");
+}
+
+#[test]
+fn drop_rename_with_content_change_from_head() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "line1\nline2\nline3\nline4\nline5\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    // Small edit preserving enough similarity for git to detect rename
+    repo.write_file("new.txt", "line1\nline2\nchanged\nline4\nline5\n");
+    repo.write_file("extra.txt", "keep\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "rename with edit"]);
+
+    let out = repo.squire(&["--json", "diff", "HEAD~1", "HEAD"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let arr = hunks.as_array().unwrap();
+
+    // The rename+content hunk has old_file=old.txt, file=new.txt
+    let rename_hunk = arr
+        .iter()
+        .find(|h| {
+            h["old_file"].as_str().unwrap() == "old.txt" && h["file"].as_str().unwrap() == "new.txt"
+        })
+        .expect("should have rename+content hunk");
+    let id = rename_hunk["id"].as_str().unwrap();
+
+    repo.squire(&["drop", "HEAD", id]);
+
+    // Both the content change AND the rename should be undone
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(
+        !show.contains("old.txt") || !show.contains("new.txt"),
+        "rename should be fully dropped from commit, got: {show}"
+    );
+    // old.txt should exist in the commit with original content
+    let content = repo.git(&["show", "HEAD:old.txt"]);
+    assert_eq!(content, "line1\nline2\nline3\nline4\nline5\n");
+}
+
+#[test]
+fn amend_into_older_commit_with_rename_in_between() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.write_file("b.txt", "world\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("a.txt", "changed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "modify a"]);
+    repo.git(&["mv", "b.txt", "b_renamed.txt"]);
+    repo.git(&["commit", "-m", "rename b"]);
+
+    // Amend a new change into the "modify a" commit (HEAD~1)
+    repo.write_file("a.txt", "changed again\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    repo.squire(&["amend", "--commit", "HEAD~1", id]);
+
+    // The rename from the later commit should still be intact
+    assert!(repo.path().join("b_renamed.txt").exists());
+    assert!(!repo.path().join("b.txt").exists());
+    let a_content = std::fs::read_to_string(repo.path().join("a.txt")).unwrap();
+    assert_eq!(a_content, "changed again\n");
+}
+
+#[test]
+fn commit_file_addition_and_deletion_together() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.write_file("b.txt", "world\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    // Delete a.txt and add c.txt
+    std::fs::remove_file(repo.path().join("a.txt")).unwrap();
+    repo.write_file("c.txt", "new content\n");
+
+    let hunks = repo.diff_json();
+    let ids: Vec<String> = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap().to_string())
+        .collect();
+    let mut args: Vec<&str> = vec!["commit", "-m", "delete a, add c"];
+    for id in &ids {
+        args.push(id);
+    }
+    repo.squire(&args);
+
+    assert!(!repo.path().join("a.txt").exists());
+    assert!(repo.path().join("c.txt").exists());
+    let show = repo.git(&["show", "--stat", "HEAD"]);
+    assert!(show.contains("a.txt"));
+    assert!(show.contains("c.txt"));
+}
+
+#[test]
+fn revert_staged_file_deletion() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["rm", "a.txt"]);
+
+    // The deletion is staged
+    let out = repo.squire(&["--json", "diff", "--cached"]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    repo.squire(&["revert", id]);
+
+    // File should be restored in both index and working tree
+    assert!(repo.path().join("a.txt").exists());
+    let content = std::fs::read_to_string(repo.path().join("a.txt")).unwrap();
+    assert_eq!(content, "hello\n");
+    let status = repo.git(&["status", "--porcelain"]);
+    assert!(status.trim().is_empty(), "should be clean: {status}");
+}
+
+#[test]
+fn stash_rename_as_delete_and_add() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.write_file("keep.txt", "stay\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    // Rename via filesystem (shows as delete + untracked add)
+    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt")).unwrap();
+    repo.write_file("keep.txt", "modified\n");
+
+    let hunks = repo.diff_json();
+    let arr = hunks.as_array().unwrap();
+    // Stash only the rename hunks (delete + add), keep the modification
+    let rename_ids: Vec<String> = arr
+        .iter()
+        .filter(|h| {
+            let f = h["file"].as_str().unwrap();
+            let of = h["old_file"].as_str().unwrap();
+            f != "keep.txt" && of != "keep.txt"
+        })
+        .map(|h| h["id"].as_str().unwrap().to_string())
+        .collect();
+    let mut args: Vec<&str> = vec!["stash"];
+    for id in &rename_ids {
+        args.push(id);
+    }
+    repo.squire(&args);
+
+    // old.txt should be restored, new.txt gone
+    assert!(repo.path().join("old.txt").exists());
+    assert!(!repo.path().join("new.txt").exists());
+    // keep.txt modification should still be in working tree
+    let keep = std::fs::read_to_string(repo.path().join("keep.txt")).unwrap();
+    assert_eq!(keep, "modified\n");
+}
+
+#[test]
+fn diff_short_shows_rename_hunk() {
+    let repo = TestRepo::new();
+    repo.write_file("old.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["mv", "old.txt", "new.txt"]);
+
+    let out = repo.squire(&["--short", "diff", "--cached"]);
+    assert!(
+        out.contains("new.txt"),
+        "short output should mention the file: {out}"
+    );
+}

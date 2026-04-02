@@ -199,7 +199,18 @@ pub fn commit(dir: &Path, message: &str) -> Result<(), String> {
 
 /// Amend the current commit. Replaces message if provided, otherwise keeps it.
 pub fn commit_amend(dir: &Path, message: Option<&str>) -> Result<(), String> {
+    commit_amend_opts(dir, message, false)
+}
+
+pub fn commit_amend_allow_empty(dir: &Path) -> Result<(), String> {
+    commit_amend_opts(dir, None, true)
+}
+
+fn commit_amend_opts(dir: &Path, message: Option<&str>, allow_empty: bool) -> Result<(), String> {
     let mut args = vec!["--amend".to_string()];
+    if allow_empty {
+        args.push("--allow-empty".to_string());
+    }
     match message {
         Some(msg) => args.extend(["-m".to_string(), msg.to_string()]),
         None => args.push("--no-edit".to_string()),
