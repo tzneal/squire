@@ -468,6 +468,29 @@ fn revert_mixed_staged_and_unstaged() {
 }
 
 #[test]
+fn revert_untracked_file_refuses() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "hello\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("new.txt", "untracked\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "new.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    let err = repo.squire_err(&["revert", id]);
+    assert!(err.contains("cannot revert untracked file"), "{err}");
+    assert!(std::fs::read_to_string(repo.path().join("new.txt")).is_ok());
+}
+
+#[test]
 fn stage_line_range_stages_partial_hunk() {
     let repo = TestRepo::new();
     repo.write_file("f.txt", "ctx1\nold1\nctx2\nold2\nctx3\n");

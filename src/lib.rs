@@ -245,7 +245,13 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             let mut cached_args = Vec::new();
             for arg in hunk_ids {
                 let id = arg.split_once(':').map_or(arg.as_str(), |(id, _)| id);
-                if find_hunk(&unstaged, id).is_ok() {
+                if let Ok(h) = find_hunk(&unstaged, id) {
+                    if h.old_file == "/dev/null" {
+                        return Err(format!(
+                            "cannot revert untracked file '{}'; use rm to delete it",
+                            h.file
+                        ));
+                    }
                     unstaged_args.push(arg.clone());
                 } else {
                     find_hunk(&cached, id).map_err(|_| format!("hunk {id} not found"))?;
