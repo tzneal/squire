@@ -1,5 +1,6 @@
 use crate::cli::Cli;
-use crate::{Output, conflict_strategy, git};
+use crate::resolve::conflict_strategy;
+use crate::{Output, git};
 use std::path::Path;
 
 /// Build a JSON array of conflict file objects with optional strategy/command.
