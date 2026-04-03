@@ -66,7 +66,7 @@ pub fn list_untracked(dir: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Pipe a patch to `git apply` with the given extra flags.
-fn apply(dir: &Path, patch: &str, extra_args: &[&str]) -> Result<(), String> {
+pub fn apply(dir: &Path, patch: &str, extra_args: &[&str]) -> Result<(), String> {
     use std::io::Write;
     let mut child = Command::new("git")
         .arg("apply")
