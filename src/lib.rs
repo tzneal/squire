@@ -5,6 +5,7 @@ pub mod git;
 pub mod output;
 pub mod rebase;
 pub mod resolve;
+pub mod response;
 
 use cli::{Cli, Command};
 use resolve::{
@@ -137,8 +138,7 @@ fn run_stash(
     emit_result(
         out,
         cli.json,
-        "stashed",
-        selected.len(),
+        response::ActionCount::Stashed(selected.len()),
         &format!("Stashed {} hunk(s)", selected.len()),
         &new_hunks,
     );
@@ -168,8 +168,7 @@ fn run_squash(
     emit_result(
         out,
         cli.json,
-        "squashed",
-        sources.len(),
+        response::ActionCount::Squashed(sources.len()),
         &format!(
             "Squashed {} commit(s) into {}",
             sources.len(),
@@ -237,22 +236,25 @@ fn run_status(cli: &Cli, out: &mut Output, dir: &Path) -> Result<(), String> {
     let (ua, ud) = output::count_lines(&unstaged);
 
     if cli.json {
-        let mut status = serde_json::json!({
-            "branch": branch,
-            "rebase_in_progress": rebasing,
-            "staged": staged,
-            "unstaged": unstaged,
-            "staged_lines": { "added": sa, "removed": sd },
-            "unstaged_lines": { "added": ua, "removed": ud },
-        });
-        if !conflicts.is_empty() {
-            let conflict_list: Vec<serde_json::Value> = conflicts
+        let status = response::StatusResult {
+            branch: branch.clone(),
+            rebase_in_progress: rebasing,
+            staged,
+            unstaged,
+            staged_lines: response::LineCounts {
+                added: sa,
+                removed: sd,
+            },
+            unstaged_lines: response::LineCounts {
+                added: ua,
+                removed: ud,
+            },
+            conflicts: conflicts
                 .iter()
-                .map(|(f, s)| serde_json::json!({"file": f, "status": s}))
-                .collect();
-            status["conflicts"] = serde_json::json!(conflict_list);
-        }
-        out.println(&status.to_string());
+                .map(|(f, s)| response::ConflictFile::new(f, s))
+                .collect(),
+        };
+        out.println(&serde_json::to_string(&status).unwrap());
     } else {
         out.println(&format!("On branch {branch}"));
         if rebasing {
@@ -317,8 +319,7 @@ fn run_drop(
     emit_result(
         out,
         cli.json,
-        "dropped",
-        selected.len(),
+        response::ActionCount::Dropped(selected.len()),
         &format!(
             "Dropped {} hunk(s) from {}",
             selected.len(),
@@ -341,8 +342,7 @@ fn run_commit(
     emit_result(
         out,
         cli.json,
-        "committed",
-        total,
+        response::ActionCount::Committed(total),
         &format!("Committed {total} hunk(s)"),
         &[],
     );
@@ -389,8 +389,7 @@ fn run_amend(
     emit_result(
         out,
         cli.json,
-        "amended",
-        total,
+        response::ActionCount::Amended(total),
         &format!("Amended {total} hunk(s) into {amended_target}"),
         &[],
     );
@@ -415,7 +414,11 @@ fn run_reword(
             .map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
     }
     if cli.json {
-        out.println(&serde_json::json!({ "reworded": true, "message": message }).to_string());
+        let result = response::RewordResult {
+            reworded: true,
+            message: message.to_string(),
+        };
+        out.println(&serde_json::to_string(&result).unwrap());
     } else {
         out.println(&format!("Reworded commit {}", short_sha(&target)));
     }
@@ -473,8 +476,7 @@ fn run_revert(cli: &Cli, out: &mut Output, dir: &Path, hunk_ids: &[String]) -> R
     emit_result(
         out,
         cli.json,
-        "reverted",
-        total,
+        response::ActionCount::Reverted(total),
         &format!("Reverted {total} hunk(s)"),
         &new_hunks,
     );
@@ -495,16 +497,15 @@ fn run_stage(
         r
     };
     let (total, new_hunks) = stage_hunks(dir, &raw, hunk_ids, unstage)?;
-    let (label, key) = if unstage {
-        ("Unstaged", "unstaged")
+    let (label, count) = if unstage {
+        ("Unstaged", response::ActionCount::Unstaged(total))
     } else {
-        ("Staged", "staged")
+        ("Staged", response::ActionCount::Staged(total))
     };
     emit_result(
         out,
         cli.json,
-        key,
-        total,
+        count,
         &format!("{label} {total} hunk(s)"),
         &new_hunks,
     );
@@ -664,34 +665,22 @@ fn print_hunks(
 fn emit_result(
     out: &mut Output,
     json: bool,
-    key: &str,
-    count: usize,
+    count: response::ActionCount,
     msg: &str,
     new_hunks: &[diff::HunkInfo],
 ) {
     if json {
-        let mut val = serde_json::json!({ key: count, "message": msg });
-        if !new_hunks.is_empty() {
-            val["new_hunks"] = serde_json::json!(
-                new_hunks
-                    .iter()
-                    .map(|h| {
-                        let mut obj = serde_json::json!({
-                            "id": h.id,
-                            "file": h.file,
-                            "old_range": h.old_range,
-                            "new_range": h.new_range,
-                            "line_hashes": h.line_hashes,
-                        });
-                        if let Some(ref header) = h.header {
-                            obj["header"] = serde_json::json!(header);
-                        }
-                        obj
-                    })
-                    .collect::<Vec<_>>()
-            );
-        }
-        out.println(&val.to_string());
+        let result = response::ActionResult {
+            count,
+            message: msg.to_string(),
+            new_hunks: new_hunks
+                .iter()
+                .map(response::NewHunkSummary::from)
+                .collect(),
+        };
+        out.println(
+            &serde_json::to_string(&result).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+        );
     } else {
         out.println(msg);
         for h in new_hunks {

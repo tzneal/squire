@@ -25,7 +25,11 @@ fn main() {
                 if e.starts_with('{') {
                     println!("{e}");
                 } else {
-                    println!("{}", serde_json::json!({ "error": e }));
+                    println!(
+                        "{}",
+                        serde_json::to_string(&squire::response::ErrorResult { error: e.clone() })
+                            .unwrap()
+                    );
                 }
             } else {
                 eprintln!("error: {e}");

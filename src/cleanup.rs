@@ -2,8 +2,8 @@ use crate::cli::Cli;
 use crate::{Output, git, short_sha};
 use std::path::Path;
 
-#[derive(serde::Serialize)]
-struct BranchInfo {
+#[derive(Debug, serde::Serialize)]
+pub struct BranchInfo {
     name: String,
     status: String,
     last_commit_date: String,
@@ -13,8 +13,8 @@ struct BranchInfo {
     note: Option<String>,
 }
 
-#[derive(serde::Serialize)]
-struct CommitSummary {
+#[derive(Debug, serde::Serialize)]
+pub struct CommitSummary {
     sha: String,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,13 +48,14 @@ pub fn run_cleanup(
     let branches = analyze_branches(dir, &master_branch, &compare_ref, &current)?;
 
     if cli.json {
-        let s = serde_json::to_string_pretty(&serde_json::json!({
-            "master_branch": master_branch,
-            "current_branch": current,
-            "has_remote": has_remote,
-            "branches": branches,
-        }))
-        .map_err(|e| format!("failed to serialize JSON: {e}"))?;
+        let result = crate::response::CleanupResult {
+            master_branch: master_branch.clone(),
+            current_branch: current.clone(),
+            has_remote,
+            branches,
+        };
+        let s = serde_json::to_string_pretty(&result)
+            .map_err(|e| format!("failed to serialize JSON: {e}"))?;
         out.println(&s);
     } else {
         format_plain(out, &master_branch, &current, &branches);
