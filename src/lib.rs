@@ -232,15 +232,7 @@ fn run_stash(
     }
 
     stash_result?;
-    let new_hunks = if had_partial {
-        let (post_raw, _) = diff_with_untracked(dir, &[])?;
-        let all = diff::parse_diff(&post_raw)?;
-        all.into_iter()
-            .filter(|h| affected_files.contains(h.file.as_str()))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let new_hunks = residual_hunks(dir, had_partial, &affected_files, false)?;
     emit_result(
         out,
         cli.json,
@@ -415,9 +407,7 @@ fn run_drop(
     let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
     let hunks = diff::parse_diff(&raw)?;
     let (selected, _) = resolve_hunks(&hunks, hunk_ids, false)?;
-    let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
-    let patch = diff::reconstruct_patch(&refs);
-    git::apply_cached(dir, &patch, true)?;
+    apply_resolved(dir, &selected, &["--cached", "--reverse"])?;
     git::commit_amend_allow_empty(dir)?;
     if !is_head {
         git::checkout_head(dir)?;
@@ -555,16 +545,14 @@ fn run_revert(cli: &Cli, out: &mut Output, dir: &Path, hunk_ids: &[String]) -> R
         }
     }
     let mut had_partial = false;
-    let mut affected_files = std::collections::HashSet::new();
+    let mut affected_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     if !unstaged_args.is_empty() {
         let (resolved, partial) = resolve_hunks(&unstaged, &unstaged_args, true)?;
         had_partial |= partial;
         for h in &resolved {
             affected_files.insert(h.file.clone());
         }
-        let refs: Vec<&diff::HunkInfo> = resolved.iter().collect();
-        let patch = diff::reconstruct_patch(&refs);
-        git::apply_worktree(dir, &patch)?;
+        apply_resolved(dir, &resolved, &["--reverse"])?;
     }
     if !cached_args.is_empty() {
         let (resolved, partial) = resolve_hunks(&cached, &cached_args, true)?;
@@ -577,15 +565,9 @@ fn run_revert(cli: &Cli, out: &mut Output, dir: &Path, hunk_ids: &[String]) -> R
         git::apply_cached(dir, &patch, true)?;
         git::apply_worktree(dir, &patch)?;
     }
-    let new_hunks = if had_partial {
-        let (raw, _) = diff_with_untracked(dir, &[])?;
-        let all = diff::parse_diff(&raw)?;
-        all.into_iter()
-            .filter(|h| affected_files.contains(&h.file))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let file_refs: std::collections::HashSet<&str> =
+        affected_files.iter().map(|s| s.as_str()).collect();
+    let new_hunks = residual_hunks(dir, had_partial, &file_refs, false)?;
     let total = unstaged_args.len() + cached_args.len();
     emit_result(
         out,
@@ -821,6 +803,37 @@ fn check_rebase_conflict(dir: &Path, err: String, json: bool) -> String {
     err
 }
 
+/// Build a patch from resolved hunks and apply it.
+fn apply_resolved(dir: &Path, hunks: &[diff::HunkInfo], args: &[&str]) -> Result<(), String> {
+    let refs: Vec<&diff::HunkInfo> = hunks.iter().collect();
+    let patch = diff::reconstruct_patch(&refs);
+    git::apply(dir, &patch, args)
+}
+
+/// Re-diff after a partial operation and return residual hunks for affected files.
+/// When `cached` is true, diffs the index; otherwise diffs the working tree (including untracked).
+fn residual_hunks(
+    dir: &Path,
+    had_partial: bool,
+    files: &std::collections::HashSet<&str>,
+    cached: bool,
+) -> Result<Vec<diff::HunkInfo>, String> {
+    if !had_partial {
+        return Ok(Vec::new());
+    }
+    let raw = if cached {
+        git::diff(dir, &["--cached".to_string()])?
+    } else {
+        let (r, _) = diff_with_untracked(dir, &[])?;
+        r
+    };
+    let all = diff::parse_diff(&raw)?;
+    Ok(all
+        .into_iter()
+        .filter(|h| files.contains(h.file.as_str()))
+        .collect())
+}
+
 /// Parse diff, resolve hunk IDs, build patch, and apply to index. Returns hunk count.
 fn stage_hunks(
     dir: &Path,
@@ -830,27 +843,14 @@ fn stage_hunks(
 ) -> Result<(usize, Vec<diff::HunkInfo>), String> {
     let hunks = diff::parse_diff(raw)?;
     let (selected, had_line_selectors) = resolve_hunks(&hunks, hunk_ids, reverse)?;
-    let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
-    let patch = diff::reconstruct_patch(&refs);
-    git::apply_cached(dir, &patch, reverse)?;
+    let mut args = vec!["--cached"];
+    if reverse {
+        args.push("--reverse");
+    }
+    apply_resolved(dir, &selected, &args)?;
 
-    let new_hunks = if had_line_selectors {
-        // Re-diff affected files to get accurate post-apply hunk IDs.
-        let files: std::collections::HashSet<&str> =
-            selected.iter().map(|h| h.file.as_str()).collect();
-        let source_raw = if reverse {
-            git::diff(dir, &["--cached".to_string()])?
-        } else {
-            let (r, _) = diff_with_untracked(dir, &[])?;
-            r
-        };
-        let all = diff::parse_diff(&source_raw)?;
-        all.into_iter()
-            .filter(|h| files.contains(h.file.as_str()))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let files: std::collections::HashSet<&str> = selected.iter().map(|h| h.file.as_str()).collect();
+    let new_hunks = residual_hunks(dir, had_line_selectors, &files, reverse)?;
 
     Ok((selected.len(), new_hunks))
 }
@@ -874,9 +874,7 @@ fn stage_hunks_or_cached(dir: &Path, hunk_ids: &[String]) -> Result<usize, Strin
     }
     if !to_stage.is_empty() {
         let (hunks_to_apply, _) = resolve_hunks(&unstaged, &to_stage, false)?;
-        let refs: Vec<&diff::HunkInfo> = hunks_to_apply.iter().collect();
-        let patch = diff::reconstruct_patch(&refs);
-        git::apply_cached(dir, &patch, false)?;
+        apply_resolved(dir, &hunks_to_apply, &["--cached"])?;
     }
     Ok(hunk_ids.len())
 }
