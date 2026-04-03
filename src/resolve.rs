@@ -278,21 +278,19 @@ pub fn check_rebase_conflict(dir: &Path, err: String, json: bool) -> String {
         let current_commit = git::rebase_current_commit(dir);
         let onto = git::rebase_onto(dir);
         if json {
-            let mut val = serde_json::json!({
-                "conflict": true,
-                "conflicting_files": crate::rebase::conflict_files_json(&files),
-                "hint": "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`."
-            });
-            if let Some((sha, msg)) = &current_commit {
-                val["current_commit"] = serde_json::json!({"sha": sha, "message": msg});
-            }
-            if let Some(ref o) = onto {
-                val["ours_theirs"] = serde_json::json!({
-                    "ours": format!("upstream ({o})"),
-                    "theirs": "your commit being replayed",
-                });
-            }
-            return val.to_string();
+            let result = crate::response::ConflictError {
+                conflict: true,
+                conflicting_files: crate::rebase::build_conflict_files(&files),
+                hint: "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`.".to_string(),
+                current_commit: current_commit.as_ref().map(|(sha, msg)| {
+                    crate::response::CommitRef { sha: sha.clone(), message: msg.clone() }
+                }),
+                ours_theirs: onto.as_ref().map(|o| crate::response::OursTheirs {
+                    ours: format!("upstream ({o})"),
+                    theirs: "your commit being replayed".to_string(),
+                }),
+            };
+            return serde_json::to_string(&result).unwrap();
         }
         let mut out = Output::default();
         if let Some((sha, subject)) = &current_commit {

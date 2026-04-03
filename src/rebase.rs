@@ -1,19 +1,18 @@
 use crate::cli::Cli;
 use crate::resolve::conflict_strategy;
+use crate::response;
 use crate::{Output, git};
 use std::path::Path;
 
-/// Build a JSON array of conflict file objects with optional strategy/command.
-pub fn conflict_files_json(files: &[(String, String)]) -> Vec<serde_json::Value> {
+/// Build typed conflict file list with optional strategy/command.
+pub fn build_conflict_files(files: &[(String, String)]) -> Vec<response::ConflictFile> {
     files
         .iter()
-        .map(|(f, s)| {
-            let mut c = serde_json::json!({"file": f, "status": s});
-            if let Some((strategy, command)) = conflict_strategy(f) {
-                c["strategy"] = serde_json::json!(strategy);
-                c["command"] = serde_json::json!(command);
+        .map(|(f, s)| match conflict_strategy(f) {
+            Some((strategy, command)) => {
+                response::ConflictFile::with_strategy(f, s, strategy, command)
             }
-            c
+            None => response::ConflictFile::new(f, s),
         })
         .collect()
 }
@@ -92,20 +91,20 @@ pub fn run_rebase(
     }
 
     if cli.json {
+        let result = response::RebaseResult::Ready {
+            branch: branch.clone(),
+            upstream: upstream.clone(),
+            commits_ahead: ahead,
+            commits_behind: behind,
+            safety_tag: tag_name.clone(),
+            steps: vec![
+                format!("GIT_EDITOR=true git rebase --empty=drop {upstream}"),
+                "squire rebase   # follow conflict instructions if any".to_string(),
+            ],
+        };
         out.println(
-            &serde_json::to_string_pretty(&serde_json::json!({
-                "state": "ready",
-                "branch": branch,
-                "upstream": upstream,
-                "commits_ahead": ahead,
-                "commits_behind": behind,
-                "safety_tag": tag_name,
-                "steps": [
-                    format!("GIT_EDITOR=true git rebase --empty=drop {upstream}"),
-                    "squire rebase   # follow conflict instructions if any",
-                ],
-            }))
-            .map_err(|e| format!("failed to serialize JSON: {e}"))?,
+            &serde_json::to_string_pretty(&result)
+                .map_err(|e| format!("failed to serialize JSON: {e}"))?,
         );
     } else {
         out.println(&format!(
@@ -132,15 +131,15 @@ fn run_rebase_up_to_date(
     ahead: usize,
 ) -> Result<(), String> {
     if cli.json {
+        let result = response::RebaseResult::UpToDate {
+            branch: branch.to_string(),
+            upstream: upstream.to_string(),
+            commits_ahead: ahead,
+            commits_behind: 0,
+        };
         out.println(
-            &serde_json::to_string_pretty(&serde_json::json!({
-                "state": "up_to_date",
-                "branch": branch,
-                "upstream": upstream,
-                "commits_ahead": ahead,
-                "commits_behind": 0,
-            }))
-            .map_err(|e| format!("failed to serialize JSON: {e}"))?,
+            &serde_json::to_string_pretty(&result)
+                .map_err(|e| format!("failed to serialize JSON: {e}"))?,
         );
     } else if ahead > 0 {
         out.println(&format!(
@@ -164,39 +163,48 @@ fn run_rebase_in_progress(
     let progress = git::rebase_progress(dir);
 
     if cli.json {
-        let mut val = serde_json::json!({
-            "state": "rebasing",
-            "branch": branch,
-        });
-        if let Some((cur, end)) = progress {
-            val["step"] = serde_json::json!(cur);
-            val["total_steps"] = serde_json::json!(end);
-        }
-        if let Some((sha, msg)) = &current_commit {
-            val["current_commit"] = serde_json::json!({"sha": sha, "message": msg});
-        }
-        if let Some(ref o) = onto {
-            val["ours_theirs"] = serde_json::json!({
-                "ours": format!("upstream ({o}) — the base you are rebasing onto"),
-                "theirs": format!("your commit being replayed from {branch}"),
-            });
-        }
-        if conflicts.is_empty() {
-            val["steps"] =
-                serde_json::json!(["GIT_EDITOR=true git rebase --continue", "squire rebase",]);
+        let (conflict_files, conflict_rules, steps) = if conflicts.is_empty() {
+            (
+                vec![],
+                None,
+                vec![
+                    "GIT_EDITOR=true git rebase --continue".to_string(),
+                    "squire rebase".to_string(),
+                ],
+            )
         } else {
-            val["conflicts"] = serde_json::json!(conflict_files_json(&conflicts));
-            val["conflict_rules"] = conflict_rules_json();
-            val["steps"] = serde_json::json!([
-                "resolve conflicts using rules above",
-                "git add <resolved files>",
-                "run tests and fix any failures",
-                "GIT_EDITOR=true git rebase --continue",
-                "squire rebase",
-            ]);
-        }
+            (
+                build_conflict_files(&conflicts),
+                Some(conflict_rules_json()),
+                vec![
+                    "resolve conflicts using rules above".to_string(),
+                    "git add <resolved files>".to_string(),
+                    "run tests and fix any failures".to_string(),
+                    "GIT_EDITOR=true git rebase --continue".to_string(),
+                    "squire rebase".to_string(),
+                ],
+            )
+        };
+        let result = response::RebaseResult::Rebasing(response::RebaseInProgress {
+            branch: branch.to_string(),
+            step: progress.map(|(cur, _)| cur),
+            total_steps: progress.map(|(_, end)| end),
+            current_commit: current_commit
+                .as_ref()
+                .map(|(sha, msg)| response::CommitRef {
+                    sha: sha.clone(),
+                    message: msg.clone(),
+                }),
+            ours_theirs: onto.as_ref().map(|o| response::OursTheirs {
+                ours: format!("upstream ({o}) — the base you are rebasing onto"),
+                theirs: format!("your commit being replayed from {branch}"),
+            }),
+            conflicts: conflict_files,
+            conflict_rules,
+            steps,
+        });
         out.println(
-            &serde_json::to_string_pretty(&val)
+            &serde_json::to_string_pretty(&result)
                 .map_err(|e| format!("failed to serialize JSON: {e}"))?,
         );
     } else if conflicts.is_empty() {
