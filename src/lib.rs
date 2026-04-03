@@ -26,7 +26,7 @@ impl Output {
     }
 }
 
-fn short_sha(sha: &str) -> &str {
+pub fn short_sha(sha: &str) -> &str {
     &sha[..8.min(sha.len())]
 }
 
@@ -36,104 +36,95 @@ pub fn conflict_strategy(filename: &str) -> Option<(&'static str, &'static str)>
     let basename = filename.rsplit('/').next().unwrap_or(filename);
     let lower = basename.to_ascii_lowercase();
 
-    // Lockfiles — accept incoming, regenerate.
-    match lower.as_str() {
-        "cargo.lock" => {
-            return Some((
-                "accept_incoming_and_relock",
-                "git checkout --theirs Cargo.lock && cargo generate-lockfile",
-            ));
+    const LOCKFILES: &[(&str, &str, &str)] = &[
+        (
+            "cargo.lock",
+            "accept_incoming_and_relock",
+            "git checkout --theirs Cargo.lock && cargo generate-lockfile",
+        ),
+        (
+            "go.sum",
+            "accept_incoming_and_relock",
+            "git checkout --theirs go.sum && go mod tidy",
+        ),
+        (
+            "package-lock.json",
+            "accept_incoming_and_relock",
+            "git checkout --theirs package-lock.json && npm install",
+        ),
+        (
+            "yarn.lock",
+            "accept_incoming_and_relock",
+            "git checkout --theirs yarn.lock && yarn install",
+        ),
+        (
+            "pnpm-lock.yaml",
+            "accept_incoming_and_relock",
+            "git checkout --theirs pnpm-lock.yaml && pnpm install",
+        ),
+        (
+            "poetry.lock",
+            "accept_incoming_and_relock",
+            "git checkout --theirs poetry.lock && poetry lock",
+        ),
+        (
+            "gemfile.lock",
+            "accept_incoming_and_relock",
+            "git checkout --theirs Gemfile.lock && bundle install",
+        ),
+        (
+            "composer.lock",
+            "accept_incoming_and_relock",
+            "git checkout --theirs composer.lock && composer install",
+        ),
+    ];
+
+    const MANIFESTS: &[(&str, &str, &str)] = &[
+        (
+            "cargo.toml",
+            "keep_both_and_relock",
+            "keep both dependency entries, then cargo generate-lockfile",
+        ),
+        (
+            "go.mod",
+            "keep_both_and_relock",
+            "keep both require/replace entries, then go mod tidy",
+        ),
+        (
+            "package.json",
+            "keep_both_and_relock",
+            "keep both dependency entries, then npm install",
+        ),
+        (
+            "pyproject.toml",
+            "keep_both_and_relock",
+            "keep both dependency entries, then re-run lock command",
+        ),
+        (
+            "gemfile",
+            "keep_both_and_relock",
+            "keep both gem entries, then bundle install",
+        ),
+    ];
+
+    const GENERATED_SUFFIXES: &[&str] = &[
+        ".pb.go",
+        ".pb.rs",
+        "_generated.go",
+        "_generated.rs",
+        ".generated.ts",
+        ".min.js",
+        ".min.css",
+    ];
+
+    for &(name, strategy, command) in LOCKFILES.iter().chain(MANIFESTS) {
+        if lower == name {
+            return Some((strategy, command));
         }
-        "go.sum" => {
-            return Some((
-                "accept_incoming_and_relock",
-                "git checkout --theirs go.sum && go mod tidy",
-            ));
-        }
-        "package-lock.json" => {
-            return Some((
-                "accept_incoming_and_relock",
-                "git checkout --theirs package-lock.json && npm install",
-            ));
-        }
-        "yarn.lock" => {
-            return Some((
-                "accept_incoming_and_relock",
-                "git checkout --theirs yarn.lock && yarn install",
-            ));
-        }
-        "pnpm-lock.yaml" => {
-            return Some((
-                "accept_incoming_and_relock",
-                "git checkout --theirs pnpm-lock.yaml && pnpm install",
-            ));
-        }
-        "poetry.lock" => {
-            return Some((
-                "accept_incoming_and_relock",
-                "git checkout --theirs poetry.lock && poetry lock",
-            ));
-        }
-        "gemfile.lock" => {
-            return Some((
-                "accept_incoming_and_relock",
-                "git checkout --theirs Gemfile.lock && bundle install",
-            ));
-        }
-        "composer.lock" => {
-            return Some((
-                "accept_incoming_and_relock",
-                "git checkout --theirs composer.lock && composer install",
-            ));
-        }
-        _ => {}
     }
 
-    // Dependency manifests — keep both sides, relock.
-    match lower.as_str() {
-        "cargo.toml" => {
-            return Some((
-                "keep_both_and_relock",
-                "keep both dependency entries, then cargo generate-lockfile",
-            ));
-        }
-        "go.mod" => {
-            return Some((
-                "keep_both_and_relock",
-                "keep both require/replace entries, then go mod tidy",
-            ));
-        }
-        "package.json" => {
-            return Some((
-                "keep_both_and_relock",
-                "keep both dependency entries, then npm install",
-            ));
-        }
-        "pyproject.toml" => {
-            return Some((
-                "keep_both_and_relock",
-                "keep both dependency entries, then re-run lock command",
-            ));
-        }
-        "gemfile" => {
-            return Some((
-                "keep_both_and_relock",
-                "keep both gem entries, then bundle install",
-            ));
-        }
-        _ => {}
-    }
-
-    // Generated files — accept incoming, regenerate.
     let lower_full = filename.to_ascii_lowercase();
-    if lower_full.ends_with(".pb.go")
-        || lower_full.ends_with(".pb.rs")
-        || lower_full.ends_with("_generated.go")
-        || lower_full.ends_with("_generated.rs")
-        || lower_full.ends_with(".generated.ts")
-        || lower_full.ends_with(".min.js")
-        || lower_full.ends_with(".min.css")
-    {
+    if GENERATED_SUFFIXES.iter().any(|s| lower_full.ends_with(s)) {
         return Some((
             "accept_incoming_and_regenerate",
             "git checkout --theirs <file>, then regenerate",
@@ -797,13 +788,9 @@ fn check_rebase_conflict(dir: &Path, err: String, json: bool) -> String {
         let current_commit = git::rebase_current_commit(dir);
         let onto = git::rebase_onto(dir);
         if json {
-            let file_list: Vec<serde_json::Value> = files
-                .iter()
-                .map(|(f, s)| serde_json::json!({"file": f, "status": s}))
-                .collect();
             let mut val = serde_json::json!({
                 "conflict": true,
-                "conflicting_files": file_list,
+                "conflicting_files": rebase::conflict_files_json(&files),
                 "hint": "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`."
             });
             if let Some((sha, msg)) = &current_commit {
@@ -817,25 +804,19 @@ fn check_rebase_conflict(dir: &Path, err: String, json: bool) -> String {
             }
             return val.to_string();
         }
-        let mut msg = String::new();
+        let mut out = Output::default();
         if let Some((sha, subject)) = &current_commit {
-            msg.push_str(&format!("Replaying: {sha:.8} {subject}\n"));
+            out.println(&format!("Replaying: {sha:.8} {subject}"));
         }
-        msg.push_str("Conflict during rebase:\n");
-        for (f, s) in &files {
-            if let Some((_, command)) = conflict_strategy(f) {
-                msg.push_str(&format!("  {s}: {f}  → {command}\n"));
-            } else {
-                msg.push_str(&format!("  {s}: {f}\n"));
-            }
-        }
+        out.println("Conflict during rebase:");
+        rebase::format_conflict_files(&mut out, &files);
         if let Some(ref o) = onto {
-            msg.push_str(&format!(
-                "Note: \"ours\" = upstream ({o}), \"theirs\" = your commit\n"
+            out.println(&format!(
+                "Note: \"ours\" = upstream ({o}), \"theirs\" = your commit"
             ));
         }
-        msg.push_str("Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`.");
-        return msg;
+        out.println("Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`.");
+        return out.stdout.trim_end().to_string();
     }
     err
 }

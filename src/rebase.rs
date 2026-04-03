@@ -2,6 +2,48 @@ use crate::cli::Cli;
 use crate::{Output, conflict_strategy, git};
 use std::path::Path;
 
+/// Build a JSON array of conflict file objects with optional strategy/command.
+pub fn conflict_files_json(files: &[(String, String)]) -> Vec<serde_json::Value> {
+    files
+        .iter()
+        .map(|(f, s)| {
+            let mut c = serde_json::json!({"file": f, "status": s});
+            if let Some((strategy, command)) = conflict_strategy(f) {
+                c["strategy"] = serde_json::json!(strategy);
+                c["command"] = serde_json::json!(command);
+            }
+            c
+        })
+        .collect()
+}
+
+/// Format conflict file list as plain text lines.
+pub fn format_conflict_files(out: &mut Output, files: &[(String, String)]) {
+    for (f, s) in files {
+        if let Some((_, command)) = conflict_strategy(f) {
+            out.println(&format!("  {s}: {f}  → {command}"));
+        } else {
+            out.println(&format!("  {s}: {f}"));
+        }
+    }
+}
+
+const CONFLICT_RULES_JSON: &str = r#"{"imports_includes":"keep both sides, then run a formatter or linter to clean up","lockfiles":"take incoming, then re-run the lock command","generated_files":"accept incoming, then regenerate","non_trivial":"show the diff and ask for guidance"}"#;
+
+fn conflict_rules_json() -> serde_json::Value {
+    serde_json::from_str(CONFLICT_RULES_JSON).unwrap()
+}
+
+fn print_conflict_rules(out: &mut Output) {
+    out.println("Conflict resolution rules:");
+    out.println(
+        "  - Imports/includes: keep both sides, then run a formatter or linter to clean up",
+    );
+    out.println("  - Lockfiles: take incoming, then re-run the lock command");
+    out.println("  - Generated files: accept incoming, then regenerate");
+    out.println("  - Non-trivial: show the diff and ask for guidance");
+}
+
 pub fn run_rebase(
     cli: &Cli,
     out: &mut Output,
@@ -142,25 +184,8 @@ fn run_rebase_in_progress(
             val["steps"] =
                 serde_json::json!(["GIT_EDITOR=true git rebase --continue", "squire rebase",]);
         } else {
-            val["conflicts"] = serde_json::json!(
-                conflicts
-                    .iter()
-                    .map(|(f, s)| {
-                        let mut c = serde_json::json!({"file": f, "status": s});
-                        if let Some((strategy, command)) = conflict_strategy(f) {
-                            c["strategy"] = serde_json::json!(strategy);
-                            c["command"] = serde_json::json!(command);
-                        }
-                        c
-                    })
-                    .collect::<Vec<_>>()
-            );
-            val["conflict_rules"] = serde_json::json!({
-                "imports_includes": "keep both sides, then run a formatter or linter to clean up",
-                "lockfiles": "take incoming, then re-run the lock command",
-                "generated_files": "accept incoming, then regenerate",
-                "non_trivial": "show the diff and ask for guidance",
-            });
+            val["conflicts"] = serde_json::json!(conflict_files_json(&conflicts));
+            val["conflict_rules"] = conflict_rules_json();
             val["steps"] = serde_json::json!([
                 "resolve conflicts using rules above",
                 "git add <resolved files>",
@@ -195,21 +220,9 @@ fn run_rebase_in_progress(
             "Rebase in progress — {} conflict(s):",
             conflicts.len()
         ));
-        for (f, s) in &conflicts {
-            if let Some((_, command)) = conflict_strategy(f) {
-                out.println(&format!("  {s}: {f}  → {command}"));
-            } else {
-                out.println(&format!("  {s}: {f}"));
-            }
-        }
+        format_conflict_files(out, &conflicts);
         out.println("");
-        out.println("Conflict resolution rules:");
-        out.println(
-            "  - Imports/includes: keep both sides, then run a formatter or linter to clean up",
-        );
-        out.println("  - Lockfiles: take incoming, then re-run the lock command");
-        out.println("  - Generated files: accept incoming, then regenerate");
-        out.println("  - Non-trivial: show the diff and ask for guidance");
+        print_conflict_rules(out);
         out.println("");
         out.println("Next steps:");
         out.println("  1. Resolve conflicts using rules above");
