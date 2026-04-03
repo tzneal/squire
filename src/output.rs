@@ -1,9 +1,6 @@
 use crate::diff::{CommitInfo, HunkInfo};
+use crate::short_sha;
 use std::fmt::Write;
-
-fn short_sha(sha: &str) -> &str {
-    &sha[..8.min(sha.len())]
-}
 
 pub fn format_log_short(commits: &[CommitInfo]) -> String {
     let mut buf = String::new();
