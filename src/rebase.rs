@@ -136,6 +136,7 @@ fn run_rebase_up_to_date(
             upstream: upstream.to_string(),
             commits_ahead: ahead,
             commits_behind: 0,
+            verify: "if a rebase was just performed, run project tests and linter to confirm it did not break anything".to_string(),
         };
         out.println(
             &serde_json::to_string_pretty(&result)
@@ -145,8 +146,10 @@ fn run_rebase_up_to_date(
         out.println(&format!(
             "Branch {branch} is up to date with {upstream} ({ahead} unpushed commit(s))."
         ));
+        out.println("If a rebase was just performed, run project tests and linter to confirm it did not break anything.");
     } else {
         out.println(&format!("Branch {branch} is up to date with {upstream}."));
+        out.println("If a rebase was just performed, run project tests and linter to confirm it did not break anything.");
     }
     Ok(())
 }
