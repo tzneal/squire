@@ -158,6 +158,7 @@ pub enum RebaseResult {
         upstream: String,
         commits_ahead: usize,
         commits_behind: usize,
+        verify: String,
     },
     Rebasing(RebaseInProgress),
 }
