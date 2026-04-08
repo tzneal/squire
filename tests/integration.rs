@@ -1938,6 +1938,42 @@ fn status_shows_conflicts_during_rebase() {
 }
 
 #[test]
+fn diff_during_rebase_conflict_does_not_panic() {
+    // Reproduce: `git diff` emits "* Unmerged path ..." lines during a
+    // rebase conflict.  The patch crate panics on these.
+    let repo = TestRepo::new();
+    repo.write_file("conflict.txt", "base\n");
+    repo.write_file("other.txt", "aaa\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("conflict.txt", "first\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+
+    repo.write_file("conflict.txt", "second\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    // Amend into HEAD~1 to trigger a conflict on replay
+    repo.write_file("conflict.txt", "boom\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~1", id]);
+
+    // We're mid-rebase with a conflict on conflict.txt.
+    // Edit a separate file so `git diff` produces a normal diff
+    // alongside the "* Unmerged path conflict.txt" line.
+    repo.write_file("other.txt", "bbb\n");
+
+    // `squire diff` should not panic on "* Unmerged path" lines
+    let (stdout, result) = repo.run_squire(&["--json", "diff"]);
+    assert!(result.is_ok(), "squire diff panicked or failed: {stdout}");
+
+    repo.git(&["rebase", "--abort"]);
+}
+
+#[test]
 fn status_no_conflicts_field_when_clean() {
     let repo = TestRepo::with_committed_file("a.txt", "old\n", "new\n");
 

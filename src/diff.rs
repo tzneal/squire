@@ -1,4 +1,3 @@
-use patch::{Line, Patch};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -32,89 +31,226 @@ pub fn parse_diff(diff_text: &str) -> Result<Vec<HunkInfo>, String> {
     if diff_text.trim().is_empty() {
         return Ok(Vec::new());
     }
-    // Strip `\ No newline at end of file` markers before parsing — the
-    // `patch` crate panics when this marker appears mid-hunk (e.g. between
-    // a `-` and `+` line when a file gains a trailing newline).  We detect
-    // when the marker follows a `+` line (new side lacks trailing newline)
-    // so we can restore the `no_newline` flag per file.
-    let mut cleaned = String::with_capacity(diff_text.len());
-    // NOTE: tracking is per-file; git produces one patch block per file so
-    // this is safe for all standard `git diff` / `git log -p` output.
+
+    let mut hunks = Vec::new();
+    let mut old_file = String::new();
+    let mut new_file = String::new();
+    // Track no-newline-at-EOF per new-side file.
     let mut no_nl_new_side = std::collections::HashSet::new();
-    let mut current_file = String::new();
-    let mut prev_was_add = false;
-    for line in diff_text.lines() {
-        if line.starts_with("+++ ") {
-            current_file = strip_diff_prefix(line.trim_start_matches("+++ "));
+    // Accumulate content lines for the current hunk.
+    let mut hunk_lines: Vec<String> = Vec::new();
+    let mut hunk_old_range = String::new();
+    let mut hunk_new_range = String::new();
+    let mut hunk_header: Option<String> = None;
+    let mut in_hunk = false;
+    // Skip combined diffs (diff --cc / diff --combined) from merge conflicts.
+    let mut in_combined = false;
+
+    let flush_hunk = |lines: &mut Vec<String>,
+                      file: &str,
+                      ofile: &str,
+                      old_range: &str,
+                      new_range: &str,
+                      header: &Option<String>,
+                      _no_nl: &std::collections::HashSet<String>,
+                      hunks: &mut Vec<HunkInfo>| {
+        if lines.is_empty() {
+            return;
+        }
+        let content = lines.join("\n") + "\n";
+        let id = hunk_id(file, old_range, &content);
+        let cl: Vec<&str> = content.lines().collect();
+        let line_hashes = compute_line_hashes(&cl);
+        let hunk_count = hunks.iter().filter(|h: &&HunkInfo| h.file == file).count();
+        // no_newline applies only to the last hunk of a file; we fix
+        // this up after all hunks are collected (see below).
+        let _ = hunk_count; // used implicitly via final fixup
+        hunks.push(HunkInfo {
+            id,
+            file: file.to_string(),
+            old_file: ofile.to_string(),
+            old_range: old_range.to_string(),
+            new_range: new_range.to_string(),
+            content,
+            header: header.clone(),
+            line_hashes,
+            no_newline: false,
+        });
+        lines.clear();
+    };
+
+    let all_lines: Vec<&str> = diff_text.lines().collect();
+    let mut i = 0;
+    while i < all_lines.len() {
+        let line = all_lines[i];
+        // Detect combined diff blocks and skip them entirely.
+        if line.starts_with("diff --cc ") || line.starts_with("diff --combined ") {
+            flush_hunk(
+                &mut hunk_lines,
+                &new_file,
+                &old_file,
+                &hunk_old_range,
+                &hunk_new_range,
+                &hunk_header,
+                &no_nl_new_side,
+                &mut hunks,
+            );
+            in_hunk = false;
+            in_combined = true;
+            i += 1;
+            continue;
+        }
+        if line.starts_with("diff --git ") {
+            in_combined = false;
+        }
+        if in_combined || line.starts_with("* Unmerged path ") {
+            i += 1;
+            continue;
+        }
+
+        // Detect --- / +++ file header pairs.  Inside a hunk a line
+        // starting with `---` is normally a removal, but if the *next*
+        // line starts with `+++ ` this is a new file header.
+        let is_file_header = line.starts_with("--- ")
+            && all_lines
+                .get(i + 1)
+                .is_some_and(|next| next.starts_with("+++ "));
+
+        if is_file_header {
+            flush_hunk(
+                &mut hunk_lines,
+                &new_file,
+                &old_file,
+                &hunk_old_range,
+                &hunk_new_range,
+                &hunk_header,
+                &no_nl_new_side,
+                &mut hunks,
+            );
+            in_hunk = false;
+            old_file = strip_diff_prefix(line.trim_start_matches("--- "));
+            new_file = strip_diff_prefix(all_lines[i + 1].trim_start_matches("+++ "));
+            i += 2;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            flush_hunk(
+                &mut hunk_lines,
+                &new_file,
+                &old_file,
+                &hunk_old_range,
+                &hunk_new_range,
+                &hunk_header,
+                &no_nl_new_side,
+                &mut hunks,
+            );
+            // Parse: -old_start,old_count +new_start,new_count @@ optional header
+            let (ranges, header) = match rest.find(" @@") {
+                Some(pos) => {
+                    let after = &rest[pos + 3..];
+                    let h = after.trim();
+                    (
+                        &rest[..pos],
+                        if h.is_empty() {
+                            None
+                        } else {
+                            Some(h.to_string())
+                        },
+                    )
+                }
+                None => return Err(format!("malformed @@ line: {line}")),
+            };
+            let parts: Vec<&str> = ranges.split_whitespace().collect();
+            if parts.len() != 2 {
+                return Err(format!("malformed range in @@ line: {line}"));
+            }
+            hunk_old_range = parts[0]
+                .strip_prefix('-')
+                .ok_or_else(|| format!("missing - in old range: {line}"))?
+                .to_string();
+            hunk_new_range = parts[1]
+                .strip_prefix('+')
+                .ok_or_else(|| format!("missing + in new range: {line}"))?
+                .to_string();
+            // Normalize "N" to "N,1" for single-line ranges (git omits the count).
+            if !hunk_old_range.contains(',') {
+                hunk_old_range.push_str(",1");
+            }
+            if !hunk_new_range.contains(',') {
+                hunk_new_range.push_str(",1");
+            }
+            hunk_header = header;
+            in_hunk = true;
+            i += 1;
+            continue;
         }
         if line.starts_with("\\ No newline at end of file") {
-            if prev_was_add {
-                no_nl_new_side.insert(current_file.clone());
+            // Check if the previous line was a + line (new side lacks newline).
+            let prev_is_add = hunk_lines.last().is_some_and(|l| l.starts_with('+'));
+            if prev_is_add {
+                no_nl_new_side.insert(new_file.clone());
             }
+            i += 1;
             continue;
         }
-        prev_was_add = line.starts_with('+') && !line.starts_with("+++ ");
-        cleaned.push_str(line);
-        cleaned.push('\n');
+        if in_hunk {
+            let first = line.as_bytes().first().copied();
+            match first {
+                Some(b'+') | Some(b'-') | Some(b' ') => hunk_lines.push(line.to_string()),
+                _ => {
+                    // Non-content line inside a hunk region — end the hunk.
+                    // This handles metadata lines (index, mode, etc.) that
+                    // appear between hunks of the same file.
+                    flush_hunk(
+                        &mut hunk_lines,
+                        &new_file,
+                        &old_file,
+                        &hunk_old_range,
+                        &hunk_new_range,
+                        &hunk_header,
+                        &no_nl_new_side,
+                        &mut hunks,
+                    );
+                    in_hunk = false;
+                }
+            }
+        }
+        // Lines outside hunks (diff --git, index, mode, similarity, rename,
+        // Binary files, etc.) are handled below via the block-level pass.
+        i += 1;
+    }
+    flush_hunk(
+        &mut hunk_lines,
+        &new_file,
+        &old_file,
+        &hunk_old_range,
+        &hunk_new_range,
+        &hunk_header,
+        &no_nl_new_side,
+        &mut hunks,
+    );
+
+    // Apply no_newline flag to the last hunk of each affected file.
+    for file in &no_nl_new_side {
+        if let Some(h) = hunks.iter_mut().rev().find(|h| &h.file == file) {
+            h.no_newline = true;
+        }
     }
 
-    // Split into per-file blocks and extract metadata-only entries
-    // (binary diffs, renames, mode changes) that the `patch` crate
-    // cannot parse.  Synthesize HunkInfo for renames so they remain
-    // visible; drop binary and mode-only blocks silently.
-    let mut metadata_hunks: Vec<HunkInfo> = Vec::new();
-    let mut parseable = String::new();
-    for (i, block) in cleaned.split("diff --git ").enumerate() {
+    // Second pass: extract metadata-only blocks (renames/copies without hunks).
+    // These have no @@ lines so the hunk parser above skips them.
+    for (i, block) in diff_text.split("diff --git ").enumerate() {
         if i == 0 {
-            parseable.push_str(block);
             continue;
         }
-        if block.contains("\nBinary files ") {
+        if block.contains("\n@@ ") || block.contains("\nBinary files ") {
             continue;
         }
-        if !block.contains("\n@@ ") {
-            // Metadata-only block (rename, copy, mode change).
-            // Synthesize a HunkInfo for renames so they show up.
-            if let Some(hunk) = parse_metadata_block(block) {
-                metadata_hunks.push(hunk);
-            }
-            continue;
+        if let Some(hunk) = parse_metadata_block(block) {
+            hunks.push(hunk);
         }
-        parseable.push_str("diff --git ");
-        parseable.push_str(block);
     }
 
-    let patches = if parseable.trim().is_empty() {
-        Vec::new()
-    } else {
-        Patch::from_multiple(&parseable).map_err(|e| format!("failed to parse diff: {e}"))?
-    };
-    let mut hunks = Vec::new();
-    for patch in &patches {
-        let file = strip_diff_prefix(&patch.new.path);
-        let old_file = strip_diff_prefix(&patch.old.path);
-        let hunk_count = patch.hunks.len();
-        let file_no_nl = no_nl_new_side.contains(&file);
-        for (hi, hunk) in patch.hunks.iter().enumerate() {
-            let content = hunk_content_string(&hunk.lines);
-            let old_range = format!("{},{}", hunk.old_range.start, hunk.old_range.count);
-            let id = hunk_id(&file, &old_range, &content);
-            let lines: Vec<&str> = content.lines().collect();
-            let line_hashes = compute_line_hashes(&lines);
-            hunks.push(HunkInfo {
-                id,
-                file: file.clone(),
-                old_file: old_file.clone(),
-                old_range,
-                new_range: format!("{},{}", hunk.new_range.start, hunk.new_range.count),
-                content,
-                header: hunk.hint().map(String::from),
-                line_hashes,
-                no_newline: file_no_nl && hi == hunk_count - 1,
-            });
-        }
-    }
-    hunks.extend(metadata_hunks);
     Ok(hunks)
 }
 
@@ -234,20 +370,6 @@ pub fn reconstruct_patch(hunks: &[&HunkInfo]) -> String {
         }
     }
     patch
-}
-
-fn hunk_content_string(lines: &[Line<'_>]) -> String {
-    use std::fmt::Write;
-    let mut s = String::new();
-    for line in lines {
-        let (prefix, text) = match line {
-            Line::Add(t) => ('+', *t),
-            Line::Remove(t) => ('-', *t),
-            Line::Context(t) => (' ', *t),
-        };
-        writeln!(s, "{prefix}{text}").unwrap();
-    }
-    s
 }
 
 /// Compute a short content-hash ID: first 8 hex chars of SHA-256 of the content.
@@ -1091,5 +1213,176 @@ rename to new.json
         // (the block contains @@). Should parse without panic.
         assert!(!hunks.is_empty());
         assert_eq!(hunks[0].file, "new.json");
+    }
+
+    #[test]
+    fn combined_diff_skipped() {
+        // Combined diffs appear during merge conflicts. The parser should
+        // skip them and still parse any normal diffs that follow.
+        let diff = "\
+diff --cc conflict.txt
+index aaa,bbb..ccc
+--- a/conflict.txt
++++ b/conflict.txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +ours
+++=======
++ theirs
+++>>>>>>> abc1234
+diff --git a/other.txt b/other.txt
+--- a/other.txt
++++ b/other.txt
+@@ -1 +1 @@
+-old
++new
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, "other.txt");
+    }
+
+    #[test]
+    fn unmerged_path_lines_skipped() {
+        let diff = "\
+* Unmerged path conflict.txt
+--- a/other.txt
++++ b/other.txt
+@@ -1 +1 @@
+-old
++new
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, "other.txt");
+    }
+
+    #[test]
+    fn single_line_range_normalized() {
+        // git omits the count when it's 1: @@ -1 +1 @@
+        let diff = "\
+--- a/f.txt
++++ b/f.txt
+@@ -1 +1 @@
+-old
++new
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks[0].old_range, "1,1");
+        assert_eq!(hunks[0].new_range, "1,1");
+    }
+
+    #[test]
+    fn removal_line_resembling_file_header() {
+        // A hunk that removes a line starting with "--- " should not
+        // be confused with a file header.
+        let diff = "\
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,2 @@
+ keep
+---- removed marker
+ end
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].content.lines().count(), 3);
+    }
+
+    #[test]
+    fn zero_zero_range_new_file() {
+        let diff = "\
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1 @@
++hello
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_range, "0,0");
+        assert_eq!(hunks[0].new_range, "1,1");
+        assert_eq!(hunks[0].file, "new.txt");
+        assert_eq!(hunks[0].old_file, "/dev/null");
+    }
+
+    #[test]
+    fn zero_zero_range_deleted_file() {
+        let diff = "\
+--- a/old.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-goodbye
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_range, "1,1");
+        assert_eq!(hunks[0].new_range, "0,0");
+        assert_eq!(hunks[0].file, "/dev/null");
+    }
+
+    #[test]
+    fn unmerged_path_before_cached_diff() {
+        // `git diff --cached` during a conflict: unmerged path line
+        // appears before a normal staged diff.
+        let diff = "\
+* Unmerged path conflict.txt
+diff --git a/g.txt b/g.txt
+index 5ea2ed4..2e09960 100644
+--- a/g.txt
++++ b/g.txt
+@@ -1 +1 @@
+-old
++new
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, "g.txt");
+    }
+
+    #[test]
+    fn diff_combined_long_form_skipped() {
+        // git uses "diff --combined" (non-dense) vs "diff --cc" (dense).
+        let diff = "\
+diff --combined f.txt
+index aaa,bbb..ccc
+--- a/f.txt
++++ b/f.txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +ours
+++=======
++ theirs
+++>>>>>>> abc1234
+diff --git a/g.txt b/g.txt
+--- a/g.txt
++++ b/g.txt
+@@ -1 +1 @@
+-old
++new
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, "g.txt");
+    }
+
+    #[test]
+    fn consecutive_untracked_files_without_diff_git() {
+        // generate_untracked_diff produces --- /dev/null / +++ b/...
+        // pairs without diff --git headers.
+        let diff = "\
+--- /dev/null
++++ b/a.txt
+@@ -0,0 +1 @@
++aaa
+--- /dev/null
++++ b/b.txt
+@@ -0,0 +1,2 @@
++bbb
++ccc
+";
+        let hunks = parse_diff(diff).unwrap();
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].file, "a.txt");
+        assert_eq!(hunks[1].file, "b.txt");
     }
 }
