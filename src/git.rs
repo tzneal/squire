@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Resolve the path to the squire binary for use as GIT_SEQUENCE_EDITOR.
 /// Checks next to current_exe and one directory up (for cargo test, where
@@ -23,6 +23,7 @@ fn git_cmd(dir: &Path, subcmd: &str, args: &[String]) -> Result<String, String> 
         .arg(subcmd)
         .args(args)
         .current_dir(dir)
+        .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
     if !output.status.success() {
@@ -37,8 +38,9 @@ pub fn is_ref(dir: &Path, s: &str) -> bool {
     Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", s])
         .current_dir(dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|st| st.success())
 }
@@ -73,8 +75,8 @@ pub fn apply(dir: &Path, patch: &str, extra_args: &[&str]) -> Result<(), String>
         .args(["--unidiff-zero", "--whitespace=nowarn"])
         .args(extra_args)
         .current_dir(dir)
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to run git apply: {e}"))?;
     child
@@ -112,6 +114,7 @@ pub fn is_clean(dir: &Path) -> Result<bool, String> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(dir)
+        .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("failed to run git status: {e}"))?;
     Ok(output.stdout.is_empty())
@@ -221,6 +224,7 @@ pub fn log(dir: &Path, n: usize) -> Result<String, String> {
             &format!("-{n}"),
         ])
         .current_dir(dir)
+        .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("failed to run git log: {e}"))?;
     if !output.status.success() {
