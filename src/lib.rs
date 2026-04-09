@@ -249,10 +249,7 @@ fn run_status(cli: &Cli, out: &mut Output, dir: &Path) -> Result<(), String> {
                 added: ua,
                 removed: ud,
             },
-            conflicts: conflicts
-                .iter()
-                .map(|(f, s)| response::ConflictFile::new(f, s))
-                .collect(),
+            conflicts: rebase::build_conflict_files(&conflicts),
         };
         out.println(&serde_json::to_string(&status).unwrap());
     } else {

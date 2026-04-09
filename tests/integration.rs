@@ -2541,7 +2541,8 @@ fn rebase_during_conflict_shows_conflicts() {
     assert_eq!(val["state"], "rebasing");
     let conflicts = val["conflicts"].as_array().unwrap();
     assert!(!conflicts.is_empty());
-    assert!(val["conflict_rules"].is_object());
+    assert!(conflicts[0]["strategy"].is_string());
+    assert!(conflicts[0]["command"].is_string());
     assert!(val["steps"].is_array());
 
     repo.git(&["rebase", "--abort"]);

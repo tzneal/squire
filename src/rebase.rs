@@ -4,7 +4,7 @@ use crate::response;
 use crate::{Output, git};
 use std::path::Path;
 
-/// Build typed conflict file list with optional strategy/command.
+/// Build typed conflict file list with strategy/command on every entry.
 pub fn build_conflict_files(files: &[(String, String)]) -> Vec<response::ConflictFile> {
     files
         .iter()
@@ -12,7 +12,12 @@ pub fn build_conflict_files(files: &[(String, String)]) -> Vec<response::Conflic
             Some((strategy, command)) => {
                 response::ConflictFile::with_strategy(f, s, strategy, command)
             }
-            None => response::ConflictFile::new(f, s),
+            None => response::ConflictFile::with_strategy(
+                f,
+                s,
+                "non_trivial",
+                "show the diff and ask for guidance",
+            ),
         })
         .collect()
 }
@@ -23,25 +28,9 @@ pub fn format_conflict_files(out: &mut Output, files: &[(String, String)]) {
         if let Some((_, command)) = conflict_strategy(f) {
             out.println(&format!("  {s}: {f}  → {command}"));
         } else {
-            out.println(&format!("  {s}: {f}"));
+            out.println(&format!("  {s}: {f}  → show the diff and ask for guidance"));
         }
     }
-}
-
-const CONFLICT_RULES_JSON: &str = r#"{"imports_includes":"keep both sides, then run a formatter or linter to clean up","lockfiles":"take incoming, then re-run the lock command","generated_files":"accept incoming, then regenerate","non_trivial":"show the diff and ask for guidance"}"#;
-
-fn conflict_rules_json() -> serde_json::Value {
-    serde_json::from_str(CONFLICT_RULES_JSON).unwrap()
-}
-
-fn print_conflict_rules(out: &mut Output) {
-    out.println("Conflict resolution rules:");
-    out.println(
-        "  - Imports/includes: keep both sides, then run a formatter or linter to clean up",
-    );
-    out.println("  - Lockfiles: take incoming, then re-run the lock command");
-    out.println("  - Generated files: accept incoming, then regenerate");
-    out.println("  - Non-trivial: show the diff and ask for guidance");
 }
 
 pub fn run_rebase(
@@ -166,10 +155,9 @@ fn run_rebase_in_progress(
     let progress = git::rebase_progress(dir);
 
     if cli.json {
-        let (conflict_files, conflict_rules, steps) = if conflicts.is_empty() {
+        let (conflict_files, steps) = if conflicts.is_empty() {
             (
                 vec![],
-                None,
                 vec![
                     "GIT_EDITOR=true git rebase --continue".to_string(),
                     "squire rebase".to_string(),
@@ -178,9 +166,8 @@ fn run_rebase_in_progress(
         } else {
             (
                 build_conflict_files(&conflicts),
-                Some(conflict_rules_json()),
                 vec![
-                    "resolve conflicts using rules above".to_string(),
+                    "resolve conflicts per each file's recommendation".to_string(),
                     "git add <resolved files>".to_string(),
                     "run tests and fix any failures".to_string(),
                     "GIT_EDITOR=true git rebase --continue".to_string(),
@@ -203,7 +190,6 @@ fn run_rebase_in_progress(
                 theirs: format!("your commit being replayed from {branch}"),
             }),
             conflicts: conflict_files,
-            conflict_rules,
             steps,
         });
         out.println(
@@ -234,10 +220,8 @@ fn run_rebase_in_progress(
         ));
         format_conflict_files(out, &conflicts);
         out.println("");
-        print_conflict_rules(out);
-        out.println("");
         out.println("Next steps:");
-        out.println("  1. Resolve conflicts using rules above");
+        out.println("  1. Resolve conflicts per each file's recommendation");
         out.println("  2. git add <resolved files>");
         out.println("  3. Run tests and fix any failures");
         out.println("  4. GIT_EDITOR=true git rebase --continue");

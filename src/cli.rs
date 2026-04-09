@@ -273,7 +273,7 @@ REBASING
      squire rebase --onto main --json    # rebase onto a specific branch
   2. Run the commands from the steps array directly — do not ask the user
   3. squire rebase --json                # check state after rebase
-  4. If conflicts: resolve per the conflict_rules in the output, `git add`,
+  4. If conflicts: resolve per each file's recommendation in the output, `git add`,
      run tests, then `GIT_EDITOR=true git rebase --continue`
   5. Repeat steps 3-4 until rebase completes
   Recovery: `git reset --hard <safety-tag>` (tag name in step 1 output)
@@ -348,8 +348,9 @@ JSON OUTPUT
       \"current_commit\": {\"sha\": \"abc1234...\", \"message\": \"feat: parser\"},
       \"ours_theirs\": {\"ours\": \"upstream (...) — the base you are rebasing onto\",
                        \"theirs\": \"your commit being replayed from feat\"},
-      \"conflicts\": [{\"file\": \"src/main.rs\", \"status\": \"both_modified\"}],
-      \"conflict_rules\": {...}, \"steps\": [...] }
+      \"conflicts\": [{\"file\": \"src/main.rs\", \"status\": \"both_modified\",
+                      \"strategy\": \"non_trivial\", \"command\": \"show the diff and ask for guidance\"}],
+      \"steps\": [...] }
     { \"state\": \"up_to_date\", \"branch\": \"feat\", \"upstream\": \"origin/main\" }
     The rebasing state includes:
       step/total_steps — rebase progress (e.g. step 2 of 3)

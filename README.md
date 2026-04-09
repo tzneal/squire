@@ -275,7 +275,8 @@ of forwarding opaque git stderr:
 {
   "conflict": true,
   "conflicting_files": [
-    { "file": "src/lib.rs", "status": "both_modified" }
+    { "file": "src/lib.rs", "status": "both_modified",
+      "strategy": "non_trivial", "command": "show the diff and ask for guidance" }
   ],
   "current_commit": { "sha": "abc1234...", "message": "feat: parser" },
   "ours_theirs": {
@@ -291,7 +292,7 @@ Plain text output:
 ```
 Replaying: abc1234f feat: parser
 Conflict during rebase:
-  both_modified: src/lib.rs
+  both_modified: src/lib.rs  → show the diff and ask for guidance
 Note: "ours" = upstream (origin/main), "theirs" = your commit
 Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`.
 To cancel: `git rebase --abort`.
@@ -304,7 +305,8 @@ To cancel: `git rebase --abort`.
   "branch": "HEAD",
   "rebase_in_progress": true,
   "conflicts": [
-    { "file": "src/lib.rs", "status": "both_modified" }
+    { "file": "src/lib.rs", "status": "both_modified",
+      "strategy": "non_trivial", "command": "show the diff and ask for guidance" }
   ],
   "staged": [],
   "unstaged": [],
