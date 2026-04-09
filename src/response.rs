@@ -89,28 +89,17 @@ pub struct StatusResult {
 pub struct ConflictFile {
     pub file: String,
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub strategy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
+    pub strategy: String,
+    pub command: String,
 }
 
 impl ConflictFile {
-    pub fn new(file: &str, status: &str) -> Self {
-        Self {
-            file: file.to_string(),
-            status: status.to_string(),
-            strategy: None,
-            command: None,
-        }
-    }
-
     pub fn with_strategy(file: &str, status: &str, strategy: &str, command: &str) -> Self {
         Self {
             file: file.to_string(),
             status: status.to_string(),
-            strategy: Some(strategy.to_string()),
-            command: Some(command.to_string()),
+            strategy: strategy.to_string(),
+            command: command.to_string(),
         }
     }
 }
@@ -176,8 +165,6 @@ pub struct RebaseInProgress {
     pub ours_theirs: Option<OursTheirs>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<ConflictFile>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conflict_rules: Option<serde_json::Value>,
     pub steps: Vec<String>,
 }
 
