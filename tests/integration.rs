@@ -3398,3 +3398,240 @@ fn diff_short_shows_rename_hunk() {
         "short output should mention the file: {out}"
     );
 }
+
+// ── Coverage: rebase.rs plain-text paths ──
+
+#[test]
+fn rebase_up_to_date_plain_text_with_unpushed_commits() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Set up origin/main at init.
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    // Add a local commit so ahead > 0 but behind == 0.
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "local"]);
+
+    let out = repo.squire(&["rebase"]);
+    assert!(out.contains("up to date"), "got: {out}");
+    assert!(out.contains("unpushed commit"), "got: {out}");
+}
+
+#[test]
+fn rebase_up_to_date_plain_text_no_unpushed() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.git(&["branch", "upstream"]);
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    let out = repo.squire(&["rebase"]);
+    assert!(out.contains("up to date"), "got: {out}");
+    assert!(!out.contains("unpushed"), "got: {out}");
+}
+
+#[test]
+fn rebase_onto_overrides_upstream() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Create a target branch with a divergent commit.
+    repo.git(&["checkout", "-b", "target"]);
+    repo.write_file("g.txt", "target\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target commit"]);
+
+    // Go back to main and add a commit.
+    repo.git(&["checkout", "main"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "main commit"]);
+
+    let out = repo.squire(&["--json", "rebase", "--onto", "target"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "ready");
+    assert_eq!(val["upstream"], "target");
+}
+
+#[test]
+fn rebase_in_progress_no_conflicts_plain_text() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "line1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+    repo.write_file("f.txt", "line2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+    repo.write_file("f.txt", "line3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "third"]);
+
+    // Split middle commit to get into a rebase state without conflicts.
+    let second = repo.git(&["rev-parse", "HEAD~1"]);
+    repo.squire(&["split", second.trim()]);
+
+    let out = repo.squire(&["rebase"]);
+    assert!(out.contains("no conflicts"), "got: {out}");
+    assert!(out.contains("rebase --continue"), "got: {out}");
+
+    repo.git(&["rebase", "--abort"]);
+}
+
+#[test]
+fn rebase_in_progress_with_conflicts_plain_text() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("f.txt", "first\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+
+    repo.write_file("f.txt", "second\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    // Trigger a conflict via amend into older commit.
+    repo.write_file("f.txt", "conflict\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~1", id]);
+
+    let out = repo.squire(&["rebase"]);
+    assert!(out.contains("conflict"), "got: {out}");
+    assert!(out.contains("Resolve conflicts"), "got: {out}");
+    assert!(out.contains("rebase --continue"), "got: {out}");
+
+    repo.git(&["rebase", "--abort"]);
+}
+
+// ── Coverage: git.rs stash with message ──
+
+#[test]
+fn stash_with_message() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("a.txt", "a-modified\n");
+
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    repo.squire(&["stash", "-m", "my stash msg", id]);
+
+    let stash_list = repo.git(&["stash", "list"]);
+    assert!(stash_list.contains("my stash msg"), "got: {stash_list}");
+}
+
+// ── Coverage: git.rs upstream_ref paths ──
+
+#[test]
+fn rebase_uses_configured_upstream() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Set up origin and a tracking branch.
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+    repo.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+
+    // Advance origin/main.
+    repo.write_file("g.txt", "origin\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "origin-only"]);
+    let origin_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &origin_sha]);
+
+    // Reset local and diverge.
+    repo.git(&["reset", "--hard", "HEAD~1"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "local"]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "ready");
+    assert_eq!(val["upstream"], "origin/main");
+}
+
+#[test]
+fn rebase_falls_back_to_origin_branch() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Set up origin.
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+
+    // Create a feature branch with no tracking, but origin/feature exists.
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.git(&["push", "origin", "feature"]);
+
+    // Advance origin/feature.
+    repo.write_file("g.txt", "origin\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "origin-only"]);
+    let origin_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/feature", &origin_sha]);
+
+    // Reset local and diverge.
+    repo.git(&["reset", "--hard", "HEAD~1"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "local"]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "ready");
+    assert_eq!(val["upstream"], "origin/feature");
+}
+
+// ── Coverage: git.rs detect_master_branch remote HEAD path ──
+
+#[test]
+fn rebase_detects_master_via_remote_head() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Set up origin with symbolic HEAD pointing to main.
+    repo.git(&["remote", "add", "origin", repo.path().to_str().unwrap()]);
+    repo.git(&["fetch", "origin"]);
+    // Set refs/remotes/origin/HEAD -> refs/remotes/origin/main
+    repo.git(&["remote", "set-head", "origin", "main"]);
+
+    // Create a feature branch with no tracking.
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "feature commit"]);
+
+    // Advance origin/main.
+    repo.git(&["checkout", "main"]);
+    repo.write_file("g.txt", "main-only\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "main advance"]);
+    let sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["update-ref", "refs/remotes/origin/main", &sha]);
+    repo.git(&["checkout", "feature"]);
+
+    let out = repo.squire(&["--json", "rebase"]);
+    let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(val["state"], "ready");
+    assert_eq!(val["upstream"], "origin/main");
+}
