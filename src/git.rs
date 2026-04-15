@@ -485,7 +485,7 @@ pub fn detect_master_branch(dir: &Path, has_remote: bool) -> Result<String, Stri
             }
         }
     }
-    for name in &["main", "master"] {
+    for name in &["main", "master", "mainline"] {
         let ref_to_check = if has_remote {
             format!("origin/{name}")
         } else {
