@@ -160,11 +160,8 @@ fn run_squash(
         .iter()
         .map(|c| git::rev_parse(dir, c))
         .collect::<Result<_, _>>()?;
-    git::rebase_squash(dir, &target, &sources)
+    git::rebase_squash(dir, &target, &sources, message)
         .map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
-    if let Some(msg) = message {
-        git::commit_amend(dir, Some(msg))?;
-    }
     emit_result(
         out,
         cli.json,

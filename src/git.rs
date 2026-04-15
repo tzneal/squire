@@ -328,10 +328,47 @@ fn rebase_seqedit(dir: &Path, parent: &str, actions: &[String]) -> Result<(), St
 }
 
 /// Non-interactive rebase that marks source commits as fixup onto the target.
-pub fn rebase_squash(dir: &Path, target: &str, sources: &[String]) -> Result<(), String> {
-    let actions: Vec<String> = sources.iter().map(|s| format!("fixup:{s}")).collect();
+/// When `message` is provided, the target commit is also reworded in the same
+/// rebase pass so the message lands on the target rather than HEAD.
+pub fn rebase_squash(
+    dir: &Path,
+    target: &str,
+    sources: &[String],
+    message: Option<&str>,
+) -> Result<(), String> {
+    let mut actions: Vec<String> = sources.iter().map(|s| format!("fixup:{s}")).collect();
+    if message.is_some() {
+        actions.push(format!("reword:{target}"));
+    }
     let parent = format!("{target}~1");
-    rebase_seqedit(dir, &parent, &actions)
+    if let Some(msg) = message {
+        let exe = squire_exe()?;
+        let mut editor_args = vec![exe.display().to_string(), "seqedit".to_string()];
+        editor_args.extend(actions.iter().cloned());
+        let seq_editor = editor_args.join(" ");
+        let msg_file = tempfile::Builder::new()
+            .prefix("squire-squash-")
+            .tempfile()
+            .map_err(|e| format!("failed to create temp file: {e}"))?;
+        std::fs::write(msg_file.path(), msg)
+            .map_err(|e| format!("failed to write squash message: {e}"))?;
+        let git_editor = format!("cp {}", msg_file.path().display());
+        let output = Command::new("git")
+            .args(["rebase", "-i", &parent])
+            .current_dir(dir)
+            .env("GIT_SEQUENCE_EDITOR", &seq_editor)
+            .env("GIT_EDITOR", &git_editor)
+            .output()
+            .map_err(|e| format!("failed to run git rebase: {e}"))?;
+        drop(msg_file);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git rebase failed: {stderr}"));
+        }
+        Ok(())
+    } else {
+        rebase_seqedit(dir, &parent, &actions)
+    }
 }
 
 /// Non-interactive rebase that marks `commit` as "edit" and stops there,

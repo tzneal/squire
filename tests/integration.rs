@@ -2198,6 +2198,34 @@ fn squash_with_message_replacement() {
 }
 
 #[test]
+fn squash_with_message_on_non_head_target() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    repo.write_file("f.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "source"]);
+    repo.write_file("g.txt", "x\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+
+    // Squash source into target with -m; "later" stays on top
+    repo.squire(&["--json", "squash", "-m", "replaced", "HEAD~2", "HEAD~1"]);
+
+    // The message should land on the target commit (HEAD~1), not HEAD
+    let target_msg = repo.git(&["log", "-1", "--format=%s", "HEAD~1"]);
+    assert_eq!(target_msg.trim(), "replaced");
+
+    // HEAD should keep its original message
+    let head_msg = repo.git(&["log", "-1", "--format=%s"]);
+    assert_eq!(head_msg.trim(), "later");
+}
+
+#[test]
 fn diff_short_mode_via_cli_flag() {
     let repo = TestRepo::with_committed_file("f.txt", "old\n", "new\n");
     let out = repo.squire(&["--short", "diff"]);
