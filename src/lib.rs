@@ -176,10 +176,25 @@ fn run_squash(
     Ok(())
 }
 
-fn run_log(cli: &Cli, out: &mut Output, dir: &Path, n: usize) -> Result<(), String> {
+fn run_log(
+    cli: &Cli,
+    out: &mut Output,
+    dir: &Path,
+    n: usize,
+    max_hunk_lines: usize,
+) -> Result<(), String> {
     let raw = git::log(dir, n)?;
     let commits = diff::parse_log(&raw)?;
     if cli.json {
+        // Only the JSON path emits raw hunk content; truncate it there to keep
+        // `squire log --json -n 50` bounded for LLM context windows. Plain and
+        // short already only emit summary lines, so they need no truncation.
+        let mut commits = commits;
+        if max_hunk_lines > 0 {
+            for c in &mut commits {
+                truncate_commit_hunks(&mut c.hunks, max_hunk_lines);
+            }
+        }
         let s = serde_json::to_string_pretty(&commits)
             .map_err(|e| format!("failed to serialize JSON: {e}"))?;
         out.println(&s);
@@ -189,6 +204,27 @@ fn run_log(cli: &Cli, out: &mut Output, dir: &Path, n: usize) -> Result<(), Stri
         out.stdout.push_str(&output::format_log_plain(&commits));
     }
     Ok(())
+}
+
+/// Cap the total content lines across a commit's hunks. Once adding a hunk
+/// would exceed the cap, that hunk (and all subsequent ones) keep their
+/// summary fields (id, file, ranges, header) but their `content` is
+/// replaced with a marker and `line_hashes` are cleared. Callers can
+/// fetch the full body with `squire show <id>`.
+fn truncate_commit_hunks(hunks: &mut [diff::HunkInfo], max_lines: usize) {
+    let mut used = 0usize;
+    for h in hunks {
+        let lines = h.content.lines().count();
+        if used.saturating_add(lines) > max_lines {
+            h.content = format!(
+                "[content truncated: {lines} lines elided; run `squire show {}` for full content]\n",
+                h.id
+            );
+            h.line_hashes.clear();
+        } else {
+            used += lines;
+        }
+    }
 }
 
 fn run_split(out: &mut Output, dir: &Path, commit: &str) -> Result<(), String> {
@@ -581,7 +617,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
         Command::Reword { commit, message } => run_reword(cli, &mut out, dir, commit, message)?,
         Command::Drop { commit, hunk_ids } => run_drop(cli, &mut out, dir, commit, hunk_ids)?,
         Command::Status => run_status(cli, &mut out, dir)?,
-        Command::Log { n } => run_log(cli, &mut out, dir, *n)?,
+        Command::Log { n, max_hunk_lines } => run_log(cli, &mut out, dir, *n, *max_hunk_lines)?,
         Command::Split { commit } => run_split(&mut out, dir, commit)?,
         Command::Cleanup { master } => cleanup::run_cleanup(cli, &mut out, dir, master.as_deref())?,
         Command::Squash { message, commits } => {

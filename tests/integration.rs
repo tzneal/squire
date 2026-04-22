@@ -1540,6 +1540,82 @@ fn log_n_limits_output() {
     assert_eq!(commits[1]["message"].as_str().unwrap(), "second");
 }
 
+#[test]
+fn log_json_truncates_bulky_hunk_content_by_default() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "seed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    // Create a commit with >100 added lines so the default cap (100) trips.
+    let mut big = String::from("seed\n");
+    for i in 0..300 {
+        big.push_str(&format!("line {i}\n"));
+    }
+    repo.write_file("f.txt", &big);
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "big"]);
+
+    let out = repo.squire(&["--json", "log", "-n", "1"]);
+    let commits: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let hunks = commits[0]["hunks"].as_array().unwrap();
+    assert!(!hunks.is_empty());
+    let h = &hunks[0];
+    // Summary fields preserved.
+    assert!(!h["id"].as_str().unwrap().is_empty());
+    assert_eq!(h["file"].as_str().unwrap(), "f.txt");
+    assert!(!h["new_range"].as_str().unwrap().is_empty());
+    // Content replaced by the truncation marker, which references `squire show`.
+    let content = h["content"].as_str().unwrap();
+    assert!(
+        content.contains("content truncated") && content.contains("squire show"),
+        "expected truncation marker, got: {content}"
+    );
+    // line_hashes cleared when truncated.
+    assert!(h["line_hashes"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn log_json_opt_out_with_max_hunk_lines_zero() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "seed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    let mut big = String::from("seed\n");
+    for i in 0..300 {
+        big.push_str(&format!("line {i}\n"));
+    }
+    repo.write_file("f.txt", &big);
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "big"]);
+
+    let out = repo.squire(&["--json", "log", "-n", "1", "--max-hunk-lines", "0"]);
+    let commits: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let h = &commits[0]["hunks"][0];
+    let content = h["content"].as_str().unwrap();
+    assert!(!content.contains("content truncated"), "got: {content}");
+    // Full content preserved — should contain some of the added lines.
+    assert!(content.contains("+line 0"), "got: {content}");
+    assert!(content.contains("+line 299"), "got: {content}");
+    assert!(!h["line_hashes"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn log_json_small_commit_is_not_truncated() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "first"]);
+    repo.write_file("f.txt", "v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    let out = repo.squire(&["--json", "log", "-n", "1"]);
+    let commits: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let content = commits[0]["hunks"][0]["content"].as_str().unwrap();
+    assert!(content.contains("+v2"), "got: {content}");
+    assert!(!content.contains("content truncated"), "got: {content}");
+}
+
 // --- cleanup command ---
 
 #[test]

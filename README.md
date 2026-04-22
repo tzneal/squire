@@ -146,6 +146,27 @@ Analyzes local branches and classifies each as:
   branch is fully merged
 - **UNMERGED** — no matching commits found in master
 
+## Commit history
+
+```bash
+squire log                           # last 10 commits, plain text
+squire log -n 5                      # last 5 commits
+squire log --short                   # one line per commit
+squire log --json                    # structured output with hunks
+squire log --max-hunk-lines 0        # no per-commit content cap
+```
+
+Lists recent commits with their hunks. Hunk IDs match what
+`squire diff <sha>~1 <sha>` would produce, so you can go straight
+from `squire log` to `squire split`, `squire stage`, or `squire drop`.
+
+To keep `squire log --json` bounded for LLM context windows, per-commit
+hunk content is capped at **100 lines by default**. Summary fields
+(`id`, `file`, `old_range`, `new_range`, `header`) are always kept;
+truncated bodies are replaced with a marker that points at
+`squire show <id>` so you can fetch the full body on demand. Pass
+`--max-hunk-lines 0` to disable the cap.
+
 ## Split a commit
 
 ```bash
