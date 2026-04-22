@@ -151,15 +151,20 @@ COMMANDS
     rebase that pauses at the commit, then resets it.
       squire split abc1234             # split any commit
 
-  squire log [-n <count>]
+  squire log [-n <count>] [--max-hunk-lines <N>]
     Show recent commits with hunk IDs. Hunk IDs match what
     `squire diff <sha>~1 <sha>` would produce, so you can go
     straight from `squire log` to `squire split` + `squire stage`.
-    Default: last 10 commits.
+    Default: last 10 commits. --json output caps per-commit hunk
+    content at 100 lines by default; summary fields (id, file,
+    ranges, header) are always kept, and truncated bodies include a
+    marker pointing at `squire show <id>`. Pass --max-hunk-lines 0
+    to disable the cap.
       squire log                       # last 10 commits
       squire log -n 5                  # last 5
       squire log --json                # structured output with hunks
       squire log --short               # one line per commit
+      squire log --max-hunk-lines 0    # no per-commit content cap
 
   squire status
     Show staged and unstaged hunks in one view, including untracked
@@ -606,11 +611,18 @@ pub enum Command {
     ///   squire log -n 5                     # last 5 commits
     ///   squire log --json                   # structured output
     ///   squire log --short                  # one line per commit
+    ///   squire log --max-hunk-lines 0       # no per-commit content cap
     #[command(verbatim_doc_comment)]
     Log {
         /// Number of commits to show
         #[arg(short, long, default_value = "10")]
         n: usize,
+        /// Per-commit cap on hunk content lines (0 = unlimited).
+        /// Keeps `squire log` output bounded for LLM context windows.
+        /// Truncated hunks retain id/file/range/header; fetch the full
+        /// body with `squire show <hunk-id>`.
+        #[arg(long, default_value = "100")]
+        max_hunk_lines: usize,
     },
 
     /// Edit a git rebase todo file (used as GIT_SEQUENCE_EDITOR)
