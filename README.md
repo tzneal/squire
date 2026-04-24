@@ -52,6 +52,7 @@ squire diff --json                   # output as JSON
 squire show abc12345                 # hunk from working tree or staged
 squire show HEAD abc12345            # hunk from last commit (falls back to diff)
 squire show HEAD~2 abc12345          # hunk from two commits ago
+squire show df489e67                 # all hunks from commit df489e67
 ```
 
 ### Stage, unstage, and revert hunks

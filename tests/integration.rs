@@ -141,6 +141,24 @@ fn show_unknown_id_fails() {
 }
 
 #[test]
+fn show_bare_commit_sha_lists_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    repo.write_file("f.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "change"]);
+    let sha = repo.git(&["rev-parse", "--short", "HEAD"]);
+    let sha = sha.trim();
+
+    let out = repo.squire(&["--json", "show", sha]);
+    let hunks: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(hunks.as_array().unwrap().len(), 1);
+    assert_eq!(hunks[0]["file"], "f.txt");
+}
+
+#[test]
 fn show_falls_back_to_unstaged_diff() {
     let repo = TestRepo::new();
     repo.write_file("f.txt", "a\n");

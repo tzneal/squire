@@ -84,9 +84,12 @@ COMMANDS
     Show a single hunk by ID. When a ref is given, searches `git show`
     output first. If the hunk is not found (or no ref is given), falls
     back to staged and unstaged working tree diffs.
+    As a convenience, if the argument resolves to a commit (not a hunk),
+    all hunks from that commit are shown.
       squire show abc12345               # from working tree or staged
       squire show HEAD abc12345          # from commit (falls back to diff)
       squire show HEAD~2 abc12345
+      squire show df489e67               # all hunks from commit df489e67
 
   squire stage <hunk-id>[:<line-selector>]...
     Stage hunks by ID (from unstaged diff). Optionally select specific
