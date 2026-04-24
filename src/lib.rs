@@ -575,8 +575,20 @@ fn run_show(cli: &Cli, out: &mut Output, dir: &Path, args: &[String]) -> Result<
     let cached_hunks = diff::parse_diff(&cached_raw)?;
     let unstaged_hunks = diff::parse_diff(&unstaged_raw)?;
     let hunk =
-        find_hunk(&cached_hunks, hunk_id).or_else(|_| find_hunk(&unstaged_hunks, hunk_id))?;
-    let resolved = resolve_show(hunk)?;
+        match find_hunk(&cached_hunks, hunk_id).or_else(|_| find_hunk(&unstaged_hunks, hunk_id)) {
+            Ok(h) => h.clone(),
+            Err(e) => {
+                // If the arg resolves to a commit, show all hunks from that commit.
+                if git_args.is_empty() && selector.is_none() && git::is_ref(dir, hunk_id) {
+                    let raw = git::show(dir, &["--format=".to_string(), hunk_id.to_string()])?;
+                    let hunks = diff::parse_diff(&raw)?;
+                    print_hunks(out, json, short, &hunks)?;
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
+    let resolved = resolve_show(&hunk)?;
     print_hunks(out, json, short, std::slice::from_ref(&resolved))?;
     Ok(())
 }
