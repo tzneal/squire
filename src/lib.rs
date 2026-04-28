@@ -36,6 +36,32 @@ pub fn short_sha(sha: &str) -> &str {
     &sha[..8.min(sha.len())]
 }
 
+fn find_todo_line(lines: &[String], sha_prefix: &str) -> Result<usize, String> {
+    let matches: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let parts: Vec<&str> = line.splitn(3, ' ').collect();
+            if parts.len() >= 2
+                && !parts[0].starts_with('#')
+                && (parts[1].starts_with(sha_prefix) || sha_prefix.starts_with(parts[1]))
+            {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    match matches.len() {
+        0 => Err(format!("no todo line matches sha prefix: {sha_prefix}")),
+        1 => Ok(matches[0]),
+        _ => Err(format!(
+            "ambiguous sha prefix {sha_prefix}: matches {} lines",
+            matches.len()
+        )),
+    }
+}
+
 fn run_seqedit(args: &[String]) -> Result<(), String> {
     if args.len() < 2 {
         return Err("seqedit requires at least one action and a todo file path".to_string());
@@ -48,7 +74,7 @@ fn run_seqedit(args: &[String]) -> Result<(), String> {
     let mut lines: Vec<String> = todo.lines().map(String::from).collect();
 
     for action_arg in actions {
-        let (action, sha_prefix) = action_arg
+        let (action, sha_part) = action_arg
             .split_once(':')
             .ok_or_else(|| format!("invalid action syntax: {action_arg} (expected action:sha)"))?;
         match action {
@@ -59,34 +85,28 @@ fn run_seqedit(args: &[String]) -> Result<(), String> {
                 ));
             }
         }
-        let matches: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(i, line)| {
-                let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                if parts.len() >= 2
-                    && !parts[0].starts_with('#')
-                    && (parts[1].starts_with(sha_prefix) || sha_prefix.starts_with(parts[1]))
-                {
-                    Some(i)
+        // Support "action:sha>after_sha" to move the line after another.
+        let (sha_prefix, move_after) = match sha_part.split_once('>') {
+            Some((s, a)) => (s, Some(a)),
+            None => (sha_part, None),
+        };
+        let idx = find_todo_line(&lines, sha_prefix)?;
+        let old_action = lines[idx].split(' ').next().unwrap();
+        lines[idx] = lines[idx].replacen(old_action, action, 1);
+        if let Some(after_sha) = move_after {
+            let line = lines.remove(idx);
+            let after_idx = find_todo_line(&lines, after_sha)?;
+            // Insert after the target and any fixup/squash lines already following it.
+            let mut insert_at = after_idx + 1;
+            while insert_at < lines.len() {
+                let first_word = lines[insert_at].split(' ').next().unwrap_or("");
+                if first_word == "fixup" || first_word == "squash" {
+                    insert_at += 1;
                 } else {
-                    None
+                    break;
                 }
-            })
-            .collect();
-        match matches.len() {
-            0 => return Err(format!("no todo line matches sha prefix: {sha_prefix}")),
-            1 => {
-                let line = &mut lines[matches[0]];
-                let old_action = line.split(' ').next().unwrap();
-                *line = line.replacen(old_action, action, 1);
             }
-            _ => {
-                return Err(format!(
-                    "ambiguous sha prefix {sha_prefix}: matches {} lines",
-                    matches.len()
-                ));
-            }
+            lines.insert(insert_at, line);
         }
     }
 

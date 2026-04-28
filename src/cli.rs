@@ -204,8 +204,14 @@ COMMANDS
     abbreviated commit hashes in the todo file (matching works in
     both directions for full and abbreviated SHAs).
 
+    To move a line after another, use action:sha>after-sha. This changes
+    the action and repositions the line directly after the target (and any
+    existing fixup/squash lines following it). Useful for folding
+    non-adjacent commits.
+
       GIT_SEQUENCE_EDITOR=\"squire seqedit edit:abc1234\" git rebase -i HEAD~3
       GIT_SEQUENCE_EDITOR=\"squire seqedit fixup:abc1 drop:def5\" git rebase -i HEAD~5
+      GIT_SEQUENCE_EDITOR=\"squire seqedit fixup:src1>tgt fixup:src2>tgt\" git rebase -i HEAD~5
 
   squire squash [-m <message>] <target> <source>...
     Fold source commits into the target commit. The target's message

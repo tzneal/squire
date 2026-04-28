@@ -371,7 +371,9 @@ pub fn rebase_autosquash(dir: &Path, target_sha: &str) -> Result<(), String> {
 fn rebase_seqedit(dir: &Path, parent: &str, actions: &[String]) -> Result<(), String> {
     let exe = squire_exe()?;
     let mut editor_args = vec![exe.display().to_string(), "seqedit".to_string()];
-    editor_args.extend_from_slice(actions);
+    for a in actions {
+        editor_args.push(format!("'{a}'"));
+    }
     let editor_script = editor_args.join(" ");
     let output = Command::new("git")
         .args(["-c", "rerere.enabled=false", "rebase", "-i", parent])
@@ -395,7 +397,10 @@ pub fn rebase_squash(
     sources: &[String],
     message: Option<&str>,
 ) -> Result<(), String> {
-    let mut actions: Vec<String> = sources.iter().map(|s| format!("fixup:{s}")).collect();
+    let mut actions: Vec<String> = sources
+        .iter()
+        .map(|s| format!("fixup:{s}>{target}"))
+        .collect();
     if message.is_some() {
         actions.push(format!("reword:{target}"));
     }
@@ -403,7 +408,9 @@ pub fn rebase_squash(
     if let Some(msg) = message {
         let exe = squire_exe()?;
         let mut editor_args = vec![exe.display().to_string(), "seqedit".to_string()];
-        editor_args.extend(actions.iter().cloned());
+        for a in &actions {
+            editor_args.push(format!("'{a}'"));
+        }
         let seq_editor = editor_args.join(" ");
         let msg_file = tempfile::Builder::new()
             .prefix("squire-squash-")
