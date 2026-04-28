@@ -161,7 +161,7 @@ COMMANDS
     Default: last 10 commits. --json output caps per-commit hunk
     content at 100 lines by default; summary fields (id, file,
     ranges, header) are always kept, and truncated bodies include a
-    marker pointing at `squire show <id>`. Pass --max-hunk-lines 0
+    marker pointing at `squire show <sha> <id>`. Pass --max-hunk-lines 0
     to disable the cap.
       squire log                       # last 10 commits
       squire log -n 5                  # last 5
