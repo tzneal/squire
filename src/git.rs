@@ -63,8 +63,60 @@ pub fn list_untracked(dir: &Path) -> Result<Vec<String>, String> {
     Ok(raw
         .lines()
         .filter(|l| !l.is_empty())
-        .map(String::from)
+        .map(git_unquote)
         .collect())
+}
+
+/// Decode a git C-style quoted path. Git wraps filenames containing special
+/// characters in double quotes and uses octal (`\003`) and standard C escapes
+/// (`\n`, `\t`, `\\`, `\"`). Unquoted paths are returned as-is.
+fn git_unquote(s: &str) -> String {
+    let s = s.trim_end_matches('\n');
+    if !(s.starts_with('"') && s.ends_with('"')) {
+        return s.to_string();
+    }
+    let inner = &s[1..s.len() - 1];
+    let mut out = Vec::new();
+    let mut chars = inner.bytes();
+    while let Some(b) = chars.next() {
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        match chars.next() {
+            Some(b'\\') => out.push(b'\\'),
+            Some(b'"') => out.push(b'"'),
+            Some(b'n') => out.push(b'\n'),
+            Some(b't') => out.push(b'\t'),
+            Some(b'r') => out.push(b'\r'),
+            Some(b'a') => out.push(b'\x07'),
+            Some(b'b') => out.push(b'\x08'),
+            Some(b'f') => out.push(b'\x0c'),
+            Some(b'v') => out.push(b'\x0b'),
+            Some(d @ b'0'..=b'3') => {
+                // Octal escape: 1-3 digits
+                let mut val = d - b'0';
+                for _ in 0..2 {
+                    // peek by cloning
+                    let mut peek = chars.clone();
+                    match peek.next() {
+                        Some(o @ b'0'..=b'7') => {
+                            val = val * 8 + (o - b'0');
+                            chars = peek;
+                        }
+                        _ => break,
+                    }
+                }
+                out.push(val);
+            }
+            Some(other) => {
+                out.push(b'\\');
+                out.push(other);
+            }
+            None => out.push(b'\\'),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Pipe a patch to `git apply` with the given extra flags.
@@ -706,4 +758,29 @@ pub fn upstream_ref(dir: &Path) -> Result<String, String> {
         return Ok(master_ref);
     }
     Err("no upstream ref found (set one with `git branch --set-upstream-to`)".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_unquote;
+
+    #[test]
+    fn unquoted_path_unchanged() {
+        assert_eq!(git_unquote("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn quoted_octal_escapes() {
+        assert_eq!(git_unquote("\"eqq\\003q\\003\\003\""), "eqq\x03q\x03\x03");
+    }
+
+    #[test]
+    fn quoted_standard_escapes() {
+        assert_eq!(git_unquote("\"a\\nb\\t\\\\c\\\"d\""), "a\nb\t\\c\"d");
+    }
+
+    #[test]
+    fn only_opening_quote_unchanged() {
+        assert_eq!(git_unquote("\"no-close"), "\"no-close");
+    }
 }
