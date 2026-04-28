@@ -3339,6 +3339,58 @@ fn squash_commits_with_rename() {
 }
 
 #[test]
+fn squash_non_adjacent_commits_folds_into_target() {
+    // Regression: when source is not directly after target in history,
+    // seqedit must move the fixup line next to the target, not leave it
+    // in place (where it would fixup into the wrong commit).
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("a.txt", "target\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write_file("b.txt", "intermediate\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "intermediate"]);
+
+    repo.write_file("c.txt", "source\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "source"]);
+    let source = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write_file("d.txt", "later\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+
+    repo.squire(&["squash", &target[..8], &source[..8]]);
+
+    // Target commit must have a NEW sha (its tree changed)
+    let new_target_sha = repo.git(&["rev-parse", "HEAD~2"]).trim().to_string();
+    assert_ne!(
+        new_target_sha, target,
+        "target SHA must change after squash"
+    );
+
+    // c.txt (from source) should be in the target commit
+    let target_files = repo.git(&["show", "--stat", "HEAD~2"]);
+    assert!(
+        target_files.contains("c.txt"),
+        "source changes should be in target commit, got: {target_files}"
+    );
+
+    // Should be 4 commits: base, target (with source folded), intermediate, later
+    let log = repo.git(&["log", "--oneline"]);
+    assert!(!log.contains("source"), "source commit should be gone");
+    assert!(log.contains("target"));
+    assert!(log.contains("intermediate"));
+    assert!(log.contains("later"));
+}
+
+#[test]
 fn split_commit_with_rename() {
     let repo = TestRepo::new();
     repo.write_file("a.txt", "hello\n");
