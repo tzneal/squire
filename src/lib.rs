@@ -192,7 +192,8 @@ fn run_log(
         let mut commits = commits;
         if max_hunk_lines > 0 {
             for c in &mut commits {
-                truncate_commit_hunks(&mut c.hunks, max_hunk_lines);
+                let sha = c.sha.clone();
+                truncate_commit_hunks(&sha, &mut c.hunks, max_hunk_lines);
             }
         }
         let s = serde_json::to_string_pretty(&commits)
@@ -210,14 +211,17 @@ fn run_log(
 /// would exceed the cap, that hunk (and all subsequent ones) keep their
 /// summary fields (id, file, ranges, header) but their `content` is
 /// replaced with a marker and `line_hashes` are cleared. Callers can
-/// fetch the full body with `squire show <id>`.
-fn truncate_commit_hunks(hunks: &mut [diff::HunkInfo], max_lines: usize) {
+/// fetch the full body with `squire show <sha> <id>` — the commit SHA is
+/// required because `squire show` without a ref only searches the working
+/// tree, not commits.
+fn truncate_commit_hunks(sha: &str, hunks: &mut [diff::HunkInfo], max_lines: usize) {
+    let short = short_sha(sha);
     let mut used = 0usize;
     for h in hunks {
         let lines = h.content.lines().count();
         if used.saturating_add(lines) > max_lines {
             h.content = format!(
-                "[content truncated: {lines} lines elided; run `squire show {}` for full content]\n",
+                "[content truncated: {lines} lines elided; run `squire show {short} {}` for full content]\n",
                 h.id
             );
             h.line_hashes.clear();

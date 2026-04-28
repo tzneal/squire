@@ -165,8 +165,10 @@ To keep `squire log --json` bounded for LLM context windows, per-commit
 hunk content is capped at **100 lines by default**. Summary fields
 (`id`, `file`, `old_range`, `new_range`, `header`) are always kept;
 truncated bodies are replaced with a marker that points at
-`squire show <id>` so you can fetch the full body on demand. Pass
-`--max-hunk-lines 0` to disable the cap.
+`squire show <sha> <id>` so you can fetch the full body on demand. The
+commit SHA is required in the marker because `squire show` without a
+ref only searches the working tree. Pass `--max-hunk-lines 0` to
+disable the cap.
 
 ## Split a commit
 

@@ -1592,6 +1592,58 @@ fn log_json_truncates_bulky_hunk_content_by_default() {
     assert!(h["line_hashes"].as_array().unwrap().is_empty());
 }
 
+// Regression test: the truncation marker printed by `squire log --json` must
+// reference a command that actually works. Previously it said
+// `squire show <id>`, which only searches the working tree and fails for
+// hunks that live in a commit. The marker now includes the commit SHA so
+// users can copy it and run it verbatim.
+#[test]
+fn log_json_truncation_marker_command_is_runnable() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "seed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+    let mut big = String::from("seed\n");
+    for i in 0..300 {
+        big.push_str(&format!("line {i}\n"));
+    }
+    repo.write_file("f.txt", &big);
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "big"]);
+
+    let out = repo.squire(&["--json", "log", "-n", "1"]);
+    let commits: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let full_sha = commits[0]["sha"].as_str().unwrap().to_string();
+    // The marker uses the short SHA (first 8 chars) to match squire log's
+    // plain-text output. Git resolves short SHAs like any other ref.
+    let short_sha = &full_sha[..8];
+    let h = &commits[0]["hunks"][0];
+    let hunk_id = h["id"].as_str().unwrap().to_string();
+    let content = h["content"].as_str().unwrap();
+
+    // The marker must include the commit SHA so the suggested command can
+    // actually locate the hunk.
+    assert!(
+        content.contains(short_sha),
+        "marker should reference commit SHA {short_sha}, got: {content}"
+    );
+
+    // The suggested command must be `squire show <sha> <id>` (the ref is
+    // required — without it, `squire show` only searches the working tree).
+    let expected_cmd = format!("squire show {short_sha} {hunk_id}");
+    assert!(
+        content.contains(&expected_cmd),
+        "expected marker to suggest `{expected_cmd}`, got: {content}"
+    );
+
+    // And running that exact command must succeed and return the full hunk.
+    let show_out = repo.squire(&["show", short_sha, &hunk_id]);
+    assert!(
+        show_out.contains("+line 0") && show_out.contains("+line 299"),
+        "squire show {short_sha} {hunk_id} should return full hunk, got: {show_out}"
+    );
+}
+
 #[test]
 fn log_json_opt_out_with_max_hunk_lines_zero() {
     let repo = TestRepo::new();
