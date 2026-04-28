@@ -3,6 +3,7 @@ use crate::resolve::conflict_strategy;
 use crate::response;
 use crate::{Output, git};
 use std::path::Path;
+use strsim::normalized_levenshtein;
 
 /// Build typed conflict file list with strategy/command on every entry.
 pub fn build_conflict_files(files: &[(String, String)]) -> Vec<response::ConflictFile> {
@@ -154,6 +155,10 @@ fn run_rebase_in_progress(
     let onto = git::rebase_onto(dir);
     let progress = git::rebase_progress(dir);
 
+    let upstream_match = current_commit
+        .as_ref()
+        .and_then(|(sha, msg)| find_upstream_match(dir, sha, msg));
+
     if cli.json {
         let (conflict_files, steps) = if conflicts.is_empty() {
             (
@@ -184,6 +189,7 @@ fn run_rebase_in_progress(
                 .map(|(sha, msg)| response::CommitRef {
                     sha: sha.clone(),
                     message: msg.clone(),
+                    upstream_match,
                 }),
             ours_theirs: onto.as_ref().map(|o| response::OursTheirs {
                 ours: format!("upstream ({o}) — the base you are rebasing onto"),
@@ -209,6 +215,15 @@ fn run_rebase_in_progress(
         if let Some((sha, msg)) = &current_commit {
             out.println(&format!("Replaying: {sha:.8} {msg}"));
         }
+        if let Some(ref m) = upstream_match {
+            out.println(&format!(
+                "⚠ Possible upstream match: {:.8} {} (message: {:.0}%, diff: {:.0}%)",
+                m.sha,
+                m.message,
+                m.message_similarity * 100.0,
+                m.diff_similarity * 100.0,
+            ));
+        }
         if let Some(ref o) = onto {
             out.println(&format!(
                 "Note: during rebase, \"ours\" = upstream ({o}), \"theirs\" = your commit from {branch}"
@@ -228,4 +243,43 @@ fn run_rebase_in_progress(
         out.println("  5. squire rebase   # check for more conflicts");
     }
     Ok(())
+}
+
+/// Search upstream (onto ref) for a commit with a similar message.
+/// If message similarity > 50%, also compute diff similarity.
+fn find_upstream_match(
+    dir: &Path,
+    commit_sha: &str,
+    commit_msg: &str,
+) -> Option<response::UpstreamMatch> {
+    let onto_sha = std::fs::read_to_string(git::git_dir_path(dir).ok()?.join("rebase-merge/onto"))
+        .ok()?
+        .trim()
+        .to_string();
+
+    let upstream_commits = git::commits_with_messages(dir, &onto_sha, 200).ok()?;
+
+    let (best_sha, best_msg, best_sim) = upstream_commits
+        .iter()
+        .map(|(sha, msg)| (sha, msg, normalized_levenshtein(commit_msg, msg)))
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())?;
+
+    if best_sim <= 0.5 {
+        return None;
+    }
+
+    let diff_sim = match (
+        git::commit_diff(dir, commit_sha),
+        git::commit_diff(dir, best_sha),
+    ) {
+        (Ok(a), Ok(b)) => normalized_levenshtein(&a, &b),
+        _ => 0.0,
+    };
+
+    Some(response::UpstreamMatch {
+        sha: best_sha.clone(),
+        message: best_msg.clone(),
+        message_similarity: (best_sim * 100.0).round() / 100.0,
+        diff_similarity: (diff_sim * 100.0).round() / 100.0,
+    })
 }

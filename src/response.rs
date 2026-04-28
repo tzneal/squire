@@ -108,6 +108,16 @@ impl ConflictFile {
 pub struct CommitRef {
     pub sha: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_match: Option<UpstreamMatch>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpstreamMatch {
+    pub sha: String,
+    pub message: String,
+    pub message_similarity: f64,
+    pub diff_similarity: f64,
 }
 
 #[derive(Debug, Serialize)]

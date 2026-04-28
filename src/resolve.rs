@@ -283,7 +283,7 @@ pub fn check_rebase_conflict(dir: &Path, err: String, json: bool) -> String {
                 conflicting_files: crate::rebase::build_conflict_files(&files),
                 hint: "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`.".to_string(),
                 current_commit: current_commit.as_ref().map(|(sha, msg)| {
-                    crate::response::CommitRef { sha: sha.clone(), message: msg.clone() }
+                    crate::response::CommitRef { sha: sha.clone(), message: msg.clone(), upstream_match: None }
                 }),
                 ours_theirs: onto.as_ref().map(|o| crate::response::OursTheirs {
                     ours: format!("upstream ({o})"),

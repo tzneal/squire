@@ -190,7 +190,7 @@ pub fn branch(dir: &Path) -> Result<String, String> {
 }
 
 /// Resolve the .git directory path.
-fn git_dir(dir: &Path) -> Result<std::path::PathBuf, String> {
+pub fn git_dir_path(dir: &Path) -> Result<std::path::PathBuf, String> {
     let raw =
         git_cmd(dir, "rev-parse", &["--git-dir".to_string()]).map(|s| s.trim().to_string())?;
     Ok(if Path::new(&raw).is_absolute() {
@@ -202,14 +202,14 @@ fn git_dir(dir: &Path) -> Result<std::path::PathBuf, String> {
 
 /// True if an interactive rebase is in progress.
 pub fn rebase_in_progress(dir: &Path) -> Result<bool, String> {
-    let gd = git_dir(dir)?;
+    let gd = git_dir_path(dir)?;
     Ok(gd.join("rebase-merge").exists() || gd.join("rebase-apply").exists())
 }
 
 /// Return the SHA and subject of the commit currently being replayed during a rebase.
 /// Returns None if not mid-rebase or the info isn't available.
 pub fn rebase_current_commit(dir: &Path) -> Option<(String, String)> {
-    let gd = git_dir(dir).ok()?;
+    let gd = git_dir_path(dir).ok()?;
     // rebase-merge/stopped-sha is written when the rebase pauses (conflict or edit).
     let sha_file = gd.join("rebase-merge/stopped-sha");
     let sha = std::fs::read_to_string(sha_file).ok()?.trim().to_string();
@@ -229,7 +229,7 @@ pub fn rebase_current_commit(dir: &Path) -> Option<(String, String)> {
 
 /// Return (current_step, total_steps) for the in-progress rebase.
 pub fn rebase_progress(dir: &Path) -> Option<(usize, usize)> {
-    let gd = git_dir(dir).ok()?;
+    let gd = git_dir_path(dir).ok()?;
     let cur: usize = std::fs::read_to_string(gd.join("rebase-merge/msgnum"))
         .ok()?
         .trim()
@@ -245,7 +245,7 @@ pub fn rebase_progress(dir: &Path) -> Option<(usize, usize)> {
 
 /// Return the onto ref for the current rebase, if available.
 pub fn rebase_onto(dir: &Path) -> Option<String> {
-    let gd = git_dir(dir).ok()?;
+    let gd = git_dir_path(dir).ok()?;
     let sha = std::fs::read_to_string(gd.join("rebase-merge/onto"))
         .ok()?
         .trim()
@@ -620,6 +620,40 @@ pub fn commit_messages(dir: &Path, branch: &str, n: usize) -> Result<Vec<String>
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect())
+}
+
+/// Get (sha, subject) pairs from `ref_name`, limited to `n`.
+pub fn commits_with_messages(
+    dir: &Path,
+    ref_name: &str,
+    n: usize,
+) -> Result<Vec<(String, String)>, String> {
+    let raw = git_cmd(
+        dir,
+        "log",
+        &[
+            "--format=%H %s".to_string(),
+            format!("-{n}"),
+            ref_name.to_string(),
+        ],
+    )?;
+    Ok(raw
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let (sha, msg) = l.split_once(' ').unwrap_or((l, ""));
+            (sha.to_string(), msg.to_string())
+        })
+        .collect())
+}
+
+/// Return the patch text (unified diff) for a single commit.
+pub fn commit_diff(dir: &Path, sha: &str) -> Result<String, String> {
+    git_cmd(
+        dir,
+        "diff-tree",
+        &["-p".to_string(), "--root".to_string(), sha.to_string()],
+    )
 }
 
 /// Return the set of SHAs on `branch` whose patches are already applied in `upstream`.
