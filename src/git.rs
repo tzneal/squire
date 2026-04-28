@@ -348,7 +348,14 @@ pub fn commit_fixup(dir: &Path, target_sha: &str) -> Result<(), String> {
 pub fn rebase_autosquash(dir: &Path, target_sha: &str) -> Result<(), String> {
     let parent = format!("{target_sha}~1");
     let output = Command::new("git")
-        .args(["rebase", "-i", "--autosquash", &parent])
+        .args([
+            "-c",
+            "rerere.enabled=false",
+            "rebase",
+            "-i",
+            "--autosquash",
+            &parent,
+        ])
         .current_dir(dir)
         .env("GIT_SEQUENCE_EDITOR", "true")
         .output()
@@ -367,7 +374,7 @@ fn rebase_seqedit(dir: &Path, parent: &str, actions: &[String]) -> Result<(), St
     editor_args.extend_from_slice(actions);
     let editor_script = editor_args.join(" ");
     let output = Command::new("git")
-        .args(["rebase", "-i", parent])
+        .args(["-c", "rerere.enabled=false", "rebase", "-i", parent])
         .current_dir(dir)
         .env("GIT_SEQUENCE_EDITOR", &editor_script)
         .output()
@@ -406,7 +413,7 @@ pub fn rebase_squash(
             .map_err(|e| format!("failed to write squash message: {e}"))?;
         let git_editor = format!("cp {}", msg_file.path().display());
         let output = Command::new("git")
-            .args(["rebase", "-i", &parent])
+            .args(["-c", "rerere.enabled=false", "rebase", "-i", &parent])
             .current_dir(dir)
             .env("GIT_SEQUENCE_EDITOR", &seq_editor)
             .env("GIT_EDITOR", &git_editor)
@@ -439,7 +446,7 @@ pub fn rebase_edit(dir: &Path, commit: &str) -> Result<(), String> {
 /// Continue an in-progress rebase.
 pub fn rebase_continue(dir: &Path) -> Result<(), String> {
     let output = Command::new("git")
-        .args(["rebase", "--continue"])
+        .args(["-c", "rerere.enabled=false", "rebase", "--continue"])
         .current_dir(dir)
         .env("GIT_EDITOR", "true")
         .output()
@@ -468,7 +475,7 @@ pub fn rebase_reword(dir: &Path, commit: &str, message: &str) -> Result<(), Stri
         .map_err(|e| format!("failed to write reword message: {e}"))?;
     let git_editor = format!("cp {}", msg_file.path().display());
     let output = Command::new("git")
-        .args(["rebase", "-i", &parent])
+        .args(["-c", "rerere.enabled=false", "rebase", "-i", &parent])
         .current_dir(dir)
         .env("GIT_SEQUENCE_EDITOR", &seq_editor)
         .env("GIT_EDITOR", &git_editor)
