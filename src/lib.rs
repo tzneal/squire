@@ -16,6 +16,9 @@ use resolve::{
 use std::fmt::Write;
 use std::path::Path;
 
+/// Max commits to search when comparing branches or finding upstream matches.
+pub const COMMIT_LOOKBACK: usize = 100;
+
 /// Collected output from a squire invocation.
 #[derive(Default)]
 pub struct Output {
