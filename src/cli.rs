@@ -126,10 +126,15 @@ COMMANDS
     Stage hunks and amend into a commit. Defaults to HEAD.
     Use --commit to target an older commit (creates a fixup commit
     and autosquash rebases). -m replaces the message (HEAD only).
+    --commit is atomic: if the autosquash rebase would leave a
+    conflict, squire aborts the rebase and rolls back the pre-rebase
+    fixup so the working history is unchanged. Retry with different
+    hunks or resolve by hand. --commit also rejects SHAs that are
+    unreachable from HEAD (e.g. rewritten by a prior amend) and
+    points at the rewritten equivalent when it can find one.
       squire amend abc12345              # amend HEAD, keep message
       squire amend -m \"new msg\" abc12345 # amend HEAD with new message
       squire amend --commit HEAD~2 abc12345  # amend older commit
-      squire amend --commit HEAD~2 abc12345   # amend older commit
 
   squire reword <commit> -m <message>
     Change a commit message without staging hunks.
@@ -510,10 +515,15 @@ pub enum Command {
     /// (creates a fixup commit and autosquash rebases).
     /// If -m is given, replaces the commit message; otherwise keeps it.
     ///
+    /// --commit is atomic: on conflict, squire aborts the rebase and
+    /// rolls back the pre-rebase fixup so the working history is
+    /// unchanged. SHAs unreachable from HEAD (e.g. rewritten by a
+    /// prior amend) are rejected with a pointer to the rewritten
+    /// equivalent when one can be found.
+    ///
     /// Examples:
     ///   squire amend abc12345                      # amend HEAD
     ///   squire amend -m "new msg" abc12345          # amend HEAD, new message
-    ///   squire amend --commit HEAD~2 abc12345       # amend older commit
     ///   squire amend --commit HEAD~2 abc12345       # amend older commit
     #[command(verbatim_doc_comment)]
     Amend {
