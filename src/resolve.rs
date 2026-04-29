@@ -1,4 +1,4 @@
-use crate::{Output, diff, git};
+use crate::{diff, git};
 use std::path::Path;
 
 /// For files whose contents are fully derived (lockfiles, manifests, generated code),
@@ -266,47 +266,6 @@ pub fn split_last_arg<'a>(
         ));
     }
     Ok((git_args, id))
-}
-
-/// Check if a rebase error is actually a conflict, and if so, return a
-/// structured error message that includes the conflicting files.
-pub fn check_rebase_conflict(dir: &Path, err: String, json: bool) -> String {
-    if let Ok(true) = git::rebase_in_progress(dir)
-        && let Ok(files) = git::conflicting_files(dir)
-        && !files.is_empty()
-    {
-        let current_commit = git::rebase_current_commit(dir);
-        let onto = git::rebase_onto(dir);
-        if json {
-            let result = crate::response::ConflictError {
-                conflict: true,
-                conflicting_files: crate::rebase::build_conflict_files(&files),
-                hint: "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`.".to_string(),
-                current_commit: current_commit.as_ref().map(|(sha, msg)| {
-                    crate::response::CommitRef { sha: sha.clone(), message: msg.clone(), upstream_match: None }
-                }),
-                ours_theirs: onto.as_ref().map(|o| crate::response::OursTheirs {
-                    ours: format!("upstream ({o})"),
-                    theirs: "your commit being replayed".to_string(),
-                }),
-            };
-            return serde_json::to_string(&result).unwrap();
-        }
-        let mut out = Output::default();
-        if let Some((sha, subject)) = &current_commit {
-            out.println(&format!("Replaying: {sha:.8} {subject}"));
-        }
-        out.println("Conflict during rebase:");
-        crate::rebase::format_conflict_files(&mut out, &files);
-        if let Some(ref o) = onto {
-            out.println(&format!(
-                "Note: \"ours\" = upstream ({o}), \"theirs\" = your commit"
-            ));
-        }
-        out.println("Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`.");
-        return out.stdout.trim_end().to_string();
-    }
-    err
 }
 
 fn try_split_range(part: &str) -> Option<(&str, &str)> {

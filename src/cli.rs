@@ -122,41 +122,48 @@ COMMANDS
       squire commit -m \"feat: parser\" abc12345
       squire commit -m \"fix: typo\" abc12345:f3,a1 def67890
 
-  squire amend [--commit <ref>] [-m <message>] <hunk-id>[:<line-selector>]...
+  squire amend [--commit <ref>] [-m <message>] [--pause-on-conflict] <hunk-id>[:<line-selector>]...
     Stage hunks and amend into a commit. Defaults to HEAD.
     Use --commit to target an older commit (creates a fixup commit
     and autosquash rebases). -m replaces the message (HEAD only).
-    --commit is atomic: if the autosquash rebase would leave a
-    conflict, squire aborts the rebase and rolls back the pre-rebase
-    fixup so the working history is unchanged. Retry with different
-    hunks or resolve by hand. --commit also rejects SHAs that are
-    unreachable from HEAD (e.g. rewritten by a prior amend) and
-    points at the rewritten equivalent when it can find one.
+    --commit is atomic by default: on conflict, squire aborts the
+    rebase and rolls back any intermediate state so the working
+    history is unchanged. Pass --pause-on-conflict to leave the
+    rebase paused instead so you can resolve by hand.
+    Rejects SHAs unreachable from HEAD (e.g. rewritten by a prior
+    amend) and points at the rewritten equivalent when it can find one.
       squire amend abc12345              # amend HEAD, keep message
       squire amend -m \"new msg\" abc12345 # amend HEAD with new message
       squire amend --commit HEAD~2 abc12345  # amend older commit
+      squire amend --commit HEAD~2 --pause-on-conflict abc12345
 
-  squire reword <commit> -m <message>
+  squire reword <commit> -m <message> [--pause-on-conflict]
     Change a commit message without staging hunks.
     For HEAD: delegates to `git commit --amend -m`.
-    For older commits: uses seqedit reword + custom GIT_EDITOR.
+    For older commits: uses seqedit reword + custom GIT_EDITOR, and
+    is atomic on conflict by default (pass --pause-on-conflict to
+    leave the rebase paused). Rejects SHAs unreachable from HEAD.
       squire reword HEAD -m \"new message\"
       squire reword HEAD~2 -m \"fix: corrected typo\"
 
-  squire drop <commit> <hunk-id>...
+  squire drop <commit> [--pause-on-conflict] <hunk-id>...
     Remove specific hunks from an existing commit (inverse of amend).
     Find hunk IDs with `squire diff <commit>~1 <commit>` or `squire log --json`.
     For HEAD: reverse-applies and amends.
-    For older commits: rebase + reverse-apply + amend + continue.
+    For older commits: rebase + reverse-apply + amend + continue,
+    atomic on conflict by default (pass --pause-on-conflict to leave
+    the rebase paused). Rejects SHAs unreachable from HEAD.
       squire drop HEAD abc12345
       squire drop HEAD~2 abc12345 def67890
 
-  squire split <commit>
+  squire split <commit> [--pause-on-conflict]
     Prepare to split a commit. Requires a clean working tree.
     Resets the target commit so its changes are unstaged, ready
     for selective re-staging with `squire stage` or `squire commit`.
     For HEAD: mixed reset. For older commits: non-interactive
-    rebase that pauses at the commit, then resets it.
+    rebase that pauses at the commit, then resets it. Non-HEAD
+    split is atomic on conflict by default (pass --pause-on-conflict
+    to leave the rebase paused). Rejects SHAs unreachable from HEAD.
       squire split abc1234             # split any commit
 
   squire log [-n <count>] [--max-hunk-lines <N>]
@@ -218,10 +225,13 @@ COMMANDS
       GIT_SEQUENCE_EDITOR=\"squire seqedit fixup:abc1 drop:def5\" git rebase -i HEAD~5
       GIT_SEQUENCE_EDITOR=\"squire seqedit fixup:src1>tgt fixup:src2>tgt\" git rebase -i HEAD~5
 
-  squire squash [-m <message>] <target> <source>...
+  squire squash [-m <message>] [--pause-on-conflict] <target> <source>...
     Fold source commits into the target commit. The target's message
     is kept; use -m to replace it. Requires a clean working tree.
     Uses seqedit + non-interactive rebase under the hood.
+    Atomic on conflict by default (pass --pause-on-conflict to leave
+    the rebase paused). Rejects SHAs unreachable from HEAD for both
+    target and sources.
       squire squash HEAD~2 HEAD~1 HEAD       # fold last 2 into HEAD~2
       squire squash abc1234 def5678          # fold def5678 into abc1234
       squire squash -m \"combined\" abc1 def5  # squash with new message
@@ -381,6 +391,19 @@ JSON ERRORS
   When --json is set, errors are also returned as JSON on stdout:
     { \"error\": \"hunk deadbeef not found\" }
   The process still exits with a non-zero status code.
+
+  Conflict errors from rebase-based commands (amend --commit, drop,
+  reword, squash, split) are richer:
+    { \"conflict\": true, \"rolled_back\": true,
+      \"conflicting_files\": [{\"file\":\"...\", \"status\":\"both_modified\", ...}],
+      \"current_commit\": {\"sha\":\"...\", \"message\":\"...\"},
+      \"ours_theirs\": {\"ours\":\"upstream (...)\", \"theirs\":\"your commit ...\"},
+      \"hint\": \"...\" }
+  rolled_back=true means squire aborted the rebase and restored HEAD,
+  so the working tree and history are unchanged. rolled_back=false
+  means the rebase is paused (caller passed --pause-on-conflict) and
+  must be resolved with `git add` + `GIT_EDITOR=true git rebase --continue`
+  or cancelled with `git rebase --abort`.
 ";
 
 #[derive(Subcommand)]
@@ -515,16 +538,21 @@ pub enum Command {
     /// (creates a fixup commit and autosquash rebases).
     /// If -m is given, replaces the commit message; otherwise keeps it.
     ///
-    /// --commit is atomic: on conflict, squire aborts the rebase and
-    /// rolls back the pre-rebase fixup so the working history is
-    /// unchanged. SHAs unreachable from HEAD (e.g. rewritten by a
-    /// prior amend) are rejected with a pointer to the rewritten
-    /// equivalent when one can be found.
+    /// --commit is atomic by default: on conflict, squire aborts the
+    /// rebase, rolls back the pre-rebase fixup, and restores any stashed
+    /// dirty tree so the working history is unchanged. Pass
+    /// --pause-on-conflict to leave the rebase paused instead so you can
+    /// resolve by hand.
+    ///
+    /// SHAs unreachable from HEAD (e.g. rewritten by a prior amend) are
+    /// rejected with a pointer to the rewritten equivalent when one can
+    /// be found.
     ///
     /// Examples:
     ///   squire amend abc12345                      # amend HEAD
     ///   squire amend -m "new msg" abc12345          # amend HEAD, new message
     ///   squire amend --commit HEAD~2 abc12345       # amend older commit
+    ///   squire amend --commit HEAD~2 --pause-on-conflict abc12345
     #[command(verbatim_doc_comment)]
     Amend {
         /// Optional replacement commit message
@@ -533,6 +561,11 @@ pub enum Command {
         /// Target commit to amend into (default: HEAD)
         #[arg(short, long)]
         commit: Option<String>,
+        /// On conflict during the autosquash rebase, leave the rebase
+        /// paused so it can be resolved by hand instead of rolling back.
+        /// No effect when `--commit` is omitted (HEAD amend never rebases).
+        #[arg(long)]
+        pause_on_conflict: bool,
         /// One or more hunk IDs to stage and amend into HEAD
         #[arg(required = true)]
         hunk_ids: Vec<String>,
@@ -543,6 +576,13 @@ pub enum Command {
     /// For HEAD: delegates to `git commit --amend -m`.
     /// For older commits: uses a non-interactive rebase with reword.
     /// Requires a clean working tree (for non-HEAD targets).
+    ///
+    /// Non-HEAD reword is atomic by default: on conflict during the
+    /// replay of subsequent commits, squire aborts the rebase and
+    /// resets HEAD to its pre-command state. Pass --pause-on-conflict
+    /// to leave the rebase paused instead.
+    ///
+    /// SHAs unreachable from HEAD are rejected.
     ///
     /// Examples:
     ///   squire reword HEAD -m "new message"
@@ -555,6 +595,11 @@ pub enum Command {
         /// New commit message
         #[arg(short, long, required = true)]
         message: String,
+        /// On conflict during the rebase replay of subsequent commits,
+        /// leave the rebase paused so it can be resolved by hand
+        /// instead of rolling back.
+        #[arg(long)]
+        pause_on_conflict: bool,
     },
 
     /// Remove specific hunks from an existing commit
@@ -567,6 +612,13 @@ pub enum Command {
     /// For older commits: uses rebase to pause, reverse-apply, amend,
     /// and continue. Requires a clean working tree.
     ///
+    /// Non-HEAD drop is atomic by default: on conflict during the
+    /// rebase replay, squire aborts the rebase and resets HEAD to its
+    /// pre-command state. Pass --pause-on-conflict to leave the rebase
+    /// paused instead.
+    ///
+    /// SHAs unreachable from HEAD are rejected.
+    ///
     /// Examples:
     ///   squire drop HEAD abc12345
     ///   squire drop HEAD~2 abc12345 def67890
@@ -575,6 +627,10 @@ pub enum Command {
         /// The commit to drop hunks from
         #[arg(required = true)]
         commit: String,
+        /// On conflict during the rebase, leave the rebase paused so it
+        /// can be resolved by hand instead of rolling back.
+        #[arg(long)]
+        pause_on_conflict: bool,
         /// One or more hunk IDs to remove from the commit
         #[arg(required = true)]
         hunk_ids: Vec<String>,
@@ -590,8 +646,15 @@ pub enum Command {
     /// For older commits: runs a non-interactive rebase to pause at
     /// the commit, then resets it.
     ///
+    /// Non-HEAD split is atomic by default: on conflict while the
+    /// rebase replays commits, squire aborts the rebase and resets
+    /// HEAD to its pre-command state. Pass --pause-on-conflict to
+    /// leave the rebase paused instead.
+    ///
     /// After splitting, use `GIT_EDITOR=true git rebase --continue` to replay
     /// remaining commits non-interactively (if the target was not HEAD).
+    ///
+    /// SHAs unreachable from HEAD are rejected.
     ///
     /// Examples:
     ///   squire split abc1234               # split a commit
@@ -600,6 +663,12 @@ pub enum Command {
         /// The commit to split
         #[arg(required = true)]
         commit: String,
+        /// On conflict while replaying commits on top of the target,
+        /// leave the rebase paused instead of rolling back. (The
+        /// target-commit reset itself never conflicts; this only
+        /// matters for non-HEAD targets with subsequent commits.)
+        #[arg(long)]
+        pause_on_conflict: bool,
     },
 
     /// Analyze local branches for cleanup
@@ -671,6 +740,13 @@ pub enum Command {
     /// source commits are discarded. Use -m to replace the message.
     /// Requires a clean working tree.
     ///
+    /// Atomic by default: on conflict during the rebase, squire aborts
+    /// the rebase and resets HEAD to its pre-command state. Pass
+    /// --pause-on-conflict to leave the rebase paused instead.
+    ///
+    /// SHAs unreachable from HEAD are rejected for the target and every
+    /// source.
+    ///
     /// Examples:
     ///   squire squash HEAD~2 HEAD~1 HEAD    # squash last 2 into HEAD~2
     ///   squire squash -m "new msg" abc1234 def5678
@@ -679,6 +755,10 @@ pub enum Command {
         /// Optional replacement commit message for the target
         #[arg(short, long)]
         message: Option<String>,
+        /// On conflict during the rebase, leave the rebase paused so it
+        /// can be resolved by hand instead of rolling back.
+        #[arg(long)]
+        pause_on_conflict: bool,
         /// Target commit (first) followed by source commits to fold in
         #[arg(required = true, num_args = 2..)]
         commits: Vec<String>,
