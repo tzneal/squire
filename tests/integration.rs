@@ -2792,6 +2792,192 @@ fn cleanup_partial_message_match() {
 }
 
 #[test]
+fn cleanup_best_match_shows_similarity() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Branch: one commit with no exact message match in master
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("g.txt", "feature content\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add the feature"]);
+    repo.git(&["checkout", "main"]);
+
+    // Master: similar message, different patch
+    repo.write_file("h.txt", "other\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add the feature flag"]);
+
+    let out = repo.squire(&["--json", "cleanup", "--master", "main"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let branches = parsed["branches"].as_array().unwrap();
+    let feature = branches.iter().find(|b| b["name"] == "feature").unwrap();
+    let commit = &feature["commits"][0];
+    let best = &commit["best_match"];
+    assert!(
+        !best.is_null(),
+        "expected best_match for unmerged commit with similar message"
+    );
+    assert!(best["message_similarity"].as_f64().unwrap() > 0.5);
+    assert!(best["diff_similarity"].is_number());
+    assert!(!best["sha"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn cleanup_no_best_match_for_applied_commits() {
+    // Commits that are patch-applied should not have best_match
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("g.txt", "feature\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add feature"]);
+    repo.git(&["checkout", "main"]);
+
+    // Squash-merge: same patch, same message
+    repo.write_file("f.txt", "advanced\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "advance main"]);
+    repo.write_file("g.txt", "feature\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add feature"]);
+
+    let out = repo.squire(&["--json", "cleanup", "--master", "main"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let branches = parsed["branches"].as_array().unwrap();
+    let feature = branches.iter().find(|b| b["name"] == "feature").unwrap();
+    assert_eq!(feature["status"], "merged_equivalent");
+    // Applied commits should not have best_match (it's omitted)
+    assert!(feature["commits"][0].get("best_match").is_none());
+}
+
+#[test]
+fn cleanup_duplicate_subject_not_false_merged_equivalent() {
+    // Branch has 2 commits both titled "fix typo" touching different files.
+    // Master has only 1 commit titled "fix typo" matching one of them.
+    // The second branch commit is genuinely unmerged — should NOT be
+    // merged_equivalent.
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Branch: two "fix typo" commits touching different files
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("a.txt", "typo fix a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "fix typo"]);
+    repo.write_file("b.txt", "typo fix b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "fix typo"]);
+    repo.git(&["checkout", "main"]);
+
+    // Master: advance, then cherry-pick only the first "fix typo"
+    repo.write_file("f.txt", "advanced\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "advance main"]);
+    // Replicate only the a.txt change with the same message
+    repo.write_file("a.txt", "typo fix a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "fix typo"]);
+
+    let out = repo.squire(&["--json", "cleanup", "--master", "main"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let branches = parsed["branches"].as_array().unwrap();
+    let feature = branches.iter().find(|b| b["name"] == "feature").unwrap();
+    // The second "fix typo" (b.txt) is NOT in master — must not be merged_equivalent
+    assert_ne!(
+        feature["status"], "merged_equivalent",
+        "branch has unmerged work but was classified as merged_equivalent"
+    );
+}
+
+#[test]
+fn cleanup_duplicate_subject_all_patches_applied_independently() {
+    // Branch has 2 commits both titled "fix typo" touching different files.
+    // Master independently has both patches applied (via separate commits
+    // with different messages). git cherry says both are applied, and the
+    // HashSet says both messages match (master also has a "fix typo").
+    // This is actually correct — both patches ARE in master — but the
+    // message match is coincidental. The commit-level detail should show
+    // patch_applied=true for both.
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Branch: two "fix typo" commits
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("a.txt", "typo fix a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "fix typo"]);
+    repo.write_file("b.txt", "typo fix b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "fix typo"]);
+    repo.git(&["checkout", "main"]);
+
+    // Master: advance, then add both patches with different messages
+    repo.write_file("f.txt", "advanced\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "advance main"]);
+    repo.write_file("a.txt", "typo fix a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "fix typo"]);
+    repo.write_file("b.txt", "typo fix b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "fix typo in b"]);
+
+    let out = repo.squire(&["--json", "cleanup", "--master", "main"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let branches = parsed["branches"].as_array().unwrap();
+    let feature = branches.iter().find(|b| b["name"] == "feature").unwrap();
+    // Both patches are genuinely in master, so merged_equivalent is correct
+    assert_eq!(feature["status"], "merged_equivalent");
+}
+
+#[test]
+fn cleanup_cherry_pick_with_reworded_message_detected() {
+    // Branch commit is cherry-picked to master with a different message.
+    // git cherry detects the patch is applied, but the current code misses
+    // it because msg_match is false. Should be merged_equivalent.
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "init\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Branch: one commit
+    repo.git(&["checkout", "-b", "feature"]);
+    repo.write_file("g.txt", "feature content\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "add feature"]);
+    let branch_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["checkout", "main"]);
+
+    // Master: advance, then cherry-pick with a different message
+    repo.write_file("f.txt", "advanced\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "advance main"]);
+    repo.git(&["cherry-pick", &branch_sha]);
+    // Reword the cherry-picked commit
+    repo.git(&["commit", "--amend", "-m", "feat: add feature (reworded)"]);
+
+    let out = repo.squire(&["--json", "cleanup", "--master", "main"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let branches = parsed["branches"].as_array().unwrap();
+    let feature = branches.iter().find(|b| b["name"] == "feature").unwrap();
+    // git cherry knows the patch is applied — should be merged_equivalent
+    assert_eq!(
+        feature["status"], "merged_equivalent",
+        "cherry-picked commit with reworded message should be detected as merged"
+    );
+}
+
+#[test]
 fn squash_with_message_replacement() {
     let repo = TestRepo::new();
     repo.write_file("f.txt", "a\n");

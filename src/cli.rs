@@ -196,10 +196,10 @@ COMMANDS
     Auto-detects the master branch (main/master) or accepts --master.
     Reports each branch as one of:
       MERGED          — fully merged via git ancestry
-      MERGED_EQUIVALENT — commit messages and patches match master
-                        (squash/cherry-pick merge)
-      NEEDS_EVALUATION — some commit messages match master but patches
-                        differ; an LLM should review these commits
+      MERGED_EQUIVALENT — all commit patches present in master
+                        (squash/cherry-pick merge, including reworded)
+      NEEDS_EVALUATION — some commits appear merged but others do not;
+                        best_match similarity scores aid evaluation
       UNMERGED        — no matching commits found in master
     Examples:
       squire cleanup                     # auto-detect master
@@ -358,14 +358,17 @@ JSON OUTPUT
         { \"name\": \"old-branch\", \"status\": \"merged\", \"commits\": [] },
         { \"name\": \"squashed\", \"status\": \"merged_equivalent\",
           \"commits\": [{ \"sha\": \"abc12345\", \"message\": \"feat: ...\",
-            \"message_in_master\": true, \"patch_applied\": true }],
-          \"note\": \"All commits have matching messages and patches...\" },
+            \"patch_applied\": true }],
+          \"note\": \"All commit patches are present in master...\" },
         { \"name\": \"maybe\", \"status\": \"needs_evaluation\",
           \"commits\": [{ \"sha\": \"def67890\", \"message\": \"fix: ...\",
-            \"message_in_master\": true, \"patch_applied\": false }],
+            \"message_in_master\": true, \"patch_applied\": false,
+            \"best_match\": { \"sha\": \"aaa111\", \"message\": \"fix: ...\",
+              \"message_similarity\": 0.95, \"diff_similarity\": 0.42 } }],
           \"note\": \"...patches differ. An LLM should evaluate...\" },
         { \"name\": \"wip\", \"status\": \"unmerged\",
-          \"commits\": [{ \"sha\": \"11223344\", \"message\": \"wip\" }] }
+          \"commits\": [{ \"sha\": \"11223344\", \"message\": \"wip\",
+            \"patch_applied\": false }] }
       ] }
 
   rebase returns one of three states:

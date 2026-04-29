@@ -257,7 +257,8 @@ fn find_upstream_match(
         .trim()
         .to_string();
 
-    let upstream_commits = git::commits_with_messages(dir, &onto_sha, 200).ok()?;
+    let upstream_commits =
+        git::commits_with_messages(dir, &onto_sha, crate::COMMIT_LOOKBACK).ok()?;
 
     let (best_sha, best_msg, best_sim) = upstream_commits
         .iter()

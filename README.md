@@ -140,12 +140,13 @@ squire cleanup --json                # structured output for LLM
 Analyzes local branches and classifies each as:
 
 - **MERGED** — fully merged via git ancestry
-- **MERGED_EQUIVALENT** — commit messages and patches match master
-  (squash/cherry-pick merge)
-- **NEEDS_EVALUATION** — some commit messages match master but patches
-  differ; an LLM should review these commits to determine if the
-  branch is fully merged
-- **UNMERGED** — no matching commits found in master
+- **MERGED_EQUIVALENT** — all commit patches are present in master
+  (squash/cherry-pick merge); includes reworded cherry-picks
+- **NEEDS_EVALUATION** — some commits appear merged but others do not;
+  each commit shows a `best_match` with message/diff similarity scores
+  for LLM evaluation
+- **UNMERGED** — no matching commits found in master; commits with
+  similar messages in master include `best_match` similarity scores
 
 ## Commit history
 
