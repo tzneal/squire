@@ -136,4 +136,42 @@ impl TestRepo {
         repo.write_file(b_name, b_new);
         repo
     }
+
+    /// Leave the repo in a mid-rebase state with a conflict on `f.txt`.
+    /// Useful for tests of `squire status` / `squire diff` / `squire rebase`
+    /// that want to exercise the rebase-in-progress code paths without
+    /// depending on `squire amend`'s conflict behavior.
+    ///
+    /// The conflict is created by rebasing a branch with conflicting edits
+    /// on top of another branch. After this returns, `.git/rebase-merge/`
+    /// exists and `f.txt` has conflict markers. Callers should run
+    /// `git rebase --abort` to clean up (or rely on TestRepo's tempdir drop).
+    // #[rustllmlint::allow(dead_public)]
+    pub fn with_rebase_conflict() -> Self {
+        let repo = Self::new();
+        repo.write_file("f.txt", "base\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "base"]);
+
+        // Branch A: change f.txt to "A".
+        repo.git(&["checkout", "-b", "branch-a"]);
+        repo.write_file("f.txt", "A\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "on branch A"]);
+
+        // Branch B from base: change f.txt to "B".
+        repo.git(&["checkout", "-b", "branch-b", "main"]);
+        repo.write_file("f.txt", "B\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "on branch B"]);
+
+        // Rebase B onto A — guaranteed conflict on f.txt. We do not
+        // assert success because git exits non-zero on conflicts.
+        let _ = std::process::Command::new("git")
+            .args(["rebase", "branch-a"])
+            .current_dir(repo.dir.path())
+            .output();
+
+        repo
+    }
 }

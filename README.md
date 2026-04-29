@@ -291,9 +291,15 @@ them or wrap the recovery commands.
 
 ## Conflict reporting
 
-When a rebase-based command (`amend --commit`, `drop`, `squash`,
-`reword`) hits a conflict, squire returns a structured error instead
-of forwarding opaque git stderr:
+`amend --commit` is **atomic**: if the rebase would leave a conflict,
+squire aborts the rebase and rolls back the pre-rebase fixup commit so
+the working history is unchanged. You get a structured error naming the
+conflicting file(s), but no half-finished rebase to resolve. Retry with
+different hunks or resolve the conflict manually with your own rebase.
+
+When a different rebase-based command (`drop`, `squash`, `reword`)
+hits a conflict, squire returns a structured error instead of forwarding
+opaque git stderr and leaves the rebase paused so you can resolve it:
 
 ```json
 {

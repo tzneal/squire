@@ -291,6 +291,124 @@ pub fn rev_parse(dir: &Path, rev: &str) -> Result<String, String> {
     git_cmd(dir, "rev-parse", &[rev.to_string()]).map(|s| s.trim().to_string())
 }
 
+/// True if `sha` is an ancestor of (or equal to) HEAD, i.e. reachable from
+/// the current branch. Uses `git merge-base --is-ancestor`, which differs
+/// from `rev-parse`: rev-parse resolves any commit in the object database
+/// (including via the reflog), while this check confirms the commit is
+/// actually part of the current branch's history.
+pub fn is_reachable_from_head(dir: &Path, sha: &str) -> Result<bool, String> {
+    let status = Command::new("git")
+        .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("failed to run git merge-base: {e}"))?;
+    // exit 0 = ancestor, 1 = not ancestor, anything else = error.
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err("git merge-base --is-ancestor failed".to_string()),
+    }
+}
+
+/// Return the subject line (`%s`) of a commit, or an error if it doesn't
+/// exist. Trims trailing newline.
+pub fn commit_subject(dir: &Path, sha: &str) -> Result<String, String> {
+    git_cmd(
+        dir,
+        "log",
+        &["--format=%s".to_string(), "-1".to_string(), sha.to_string()],
+    )
+    .map(|s| s.trim().to_string())
+}
+
+/// Find a commit reachable from HEAD whose subject line equals `subject`
+/// (and, optionally, whose author date equals `author_date`). Searches up
+/// to `limit` commits back from HEAD. Returns None if no match.
+///
+/// Used to suggest a rewritten equivalent when the user supplies a SHA
+/// that is no longer reachable from HEAD (e.g. after a prior amend
+/// replayed the target commit).
+pub fn find_reachable_by_subject(
+    dir: &Path,
+    subject: &str,
+    author_date: Option<&str>,
+    limit: usize,
+) -> Result<Option<String>, String> {
+    // %H = full sha, %ai = author date (ISO). NUL-separated rows so
+    // subjects containing the field separator don't confuse us.
+    let raw = git_cmd(
+        dir,
+        "log",
+        &[
+            "--format=%H%x1f%ai%x1f%s%x00".to_string(),
+            format!("-{limit}"),
+            "HEAD".to_string(),
+        ],
+    )?;
+    for row in raw.split('\0') {
+        let row = row.trim_start_matches('\n');
+        if row.is_empty() {
+            continue;
+        }
+        let mut parts = row.splitn(3, '\x1f');
+        let sha = match parts.next() {
+            Some(s) => s.trim(),
+            None => continue,
+        };
+        let date = parts.next().unwrap_or("").trim();
+        let subj = parts.next().unwrap_or("").trim();
+        if subj != subject {
+            continue;
+        }
+        if let Some(expected_date) = author_date
+            && date != expected_date
+        {
+            continue;
+        }
+        return Ok(Some(sha.to_string()));
+    }
+    Ok(None)
+}
+
+/// Return the author date (`%ai`, ISO 8601 with timezone) of a commit.
+pub fn commit_author_date(dir: &Path, sha: &str) -> Result<String, String> {
+    git_cmd(
+        dir,
+        "log",
+        &[
+            "--format=%ai".to_string(),
+            "-1".to_string(),
+            sha.to_string(),
+        ],
+    )
+    .map(|s| s.trim().to_string())
+}
+
+/// Abort an in-progress rebase. Best-effort: swallows errors so callers
+/// can chain it with other cleanup steps.
+pub fn rebase_abort(dir: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["rebase", "--abort"])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to run git rebase --abort: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git rebase --abort failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Hard-reset to the given ref.
+pub fn reset_hard(dir: &Path, rev: &str) -> Result<(), String> {
+    git_cmd(dir, "reset", &["--hard".to_string(), rev.to_string()])?;
+    Ok(())
+}
+
 /// Mixed reset to the given ref.
 pub fn reset_mixed(dir: &Path, rev: &str) -> Result<(), String> {
     git_cmd(dir, "reset", &[rev.to_string()])?;
