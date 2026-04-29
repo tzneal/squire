@@ -175,10 +175,10 @@ fn run_squash(
     if !git::is_clean(dir)? {
         return Err("squash requires a clean working tree".to_string());
     }
-    let target = git::rev_parse(dir, &commits[0])?;
+    let target = resolve_reachable_commit(dir, &commits[0])?;
     let sources: Vec<String> = commits[1..]
         .iter()
-        .map(|c| git::rev_parse(dir, c))
+        .map(|c| resolve_reachable_commit(dir, c))
         .collect::<Result<_, _>>()?;
     git::rebase_squash(dir, &target, &sources, message)
         .map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
@@ -255,7 +255,7 @@ fn run_split(out: &mut Output, dir: &Path, commit: &str) -> Result<(), String> {
     if !git::is_clean(dir)? {
         return Err("split requires a clean working tree".to_string());
     }
-    let target = git::rev_parse(dir, commit)?;
+    let target = resolve_reachable_commit(dir, commit)?;
     let head = git::rev_parse(dir, "HEAD")?;
     if target == head {
         git::reset_mixed(dir, "HEAD~1")?;
@@ -351,7 +351,7 @@ fn run_drop(
     commit: &str,
     hunk_ids: &[String],
 ) -> Result<(), String> {
-    let target = git::rev_parse(dir, commit)?;
+    let target = resolve_reachable_commit(dir, commit)?;
     let head = git::rev_parse(dir, "HEAD")?;
     let is_head = target == head;
     if !is_head {
@@ -414,24 +414,52 @@ fn run_amend(
     let total = stage_hunks_or_cached(dir, hunk_ids)?;
     let mut amended_target = String::from("HEAD");
     if let Some(rev) = commit {
-        let target = git::rev_parse(dir, rev)?;
         let head = git::rev_parse(dir, "HEAD")?;
+        let target = resolve_reachable_commit(dir, rev)?;
         if target == head {
             git::commit_amend(dir, message)?;
         } else if message.is_some() {
             return Err("-m cannot be used with --commit for non-HEAD targets".to_string());
         } else {
             amended_target = short_sha(&target).to_string();
+            // Snapshot HEAD before we create the fixup so we can detect
+            // and roll it back if the rebase aborts.
+            let head_before_fixup = head.clone();
             git::commit_fixup(dir, &target)?;
             let dirty = !git::is_clean(dir)?;
             if dirty {
                 git::stash_push(dir, None)?;
             }
             if let Err(e) = git::rebase_autosquash(dir, &target) {
+                // The rebase failed. Three things need to happen, in order:
+                //   1. Capture any conflict info while the rebase is still
+                //      in progress, because the abort in step 2 deletes the
+                //      `.git/rebase-merge/*` state the formatter reads.
+                //   2. If a rebase is still in progress (conflict), abort it
+                //      so we leave the repo in a clean state.
+                //   3. Roll back the fixup commit we created on HEAD before
+                //      starting the rebase — otherwise the user is left with
+                //      a dangling `fixup! ...` commit.
+                //   4. Restore the stashed dirty tree if we stashed one.
+                // This makes `amend --commit` atomic: either it succeeds or
+                // the working history is unchanged.
+                let formatted = amend_conflict_error(dir, e, cli.json);
+                if let Ok(true) = git::rebase_in_progress(dir) {
+                    let _ = git::rebase_abort(dir);
+                }
+                // Only roll back if HEAD currently points at the fixup commit
+                // we created (HEAD moved forward by exactly one commit whose
+                // parent is head_before_fixup). This guards against clobbering
+                // state we didn't create.
+                if let Ok(parent) = git::rev_parse(dir, "HEAD^")
+                    && parent == head_before_fixup
+                {
+                    let _ = git::reset_hard(dir, &head_before_fixup);
+                }
                 if dirty {
                     let _ = git::stash_pop(dir);
                 }
-                return Err(check_rebase_conflict(dir, e, cli.json));
+                return Err(formatted);
             }
             if dirty {
                 git::stash_pop(dir)?;
@@ -450,6 +478,122 @@ fn run_amend(
     Ok(())
 }
 
+/// Build an error message for a commit SHA that resolves but isn't
+/// reachable from HEAD. When possible, look up the rewritten equivalent
+/// on the current branch (by matching the original commit's subject and
+/// author date) and suggest retrying with it.
+fn stale_sha_error(dir: &Path, input: &str, resolved_sha: &str) -> String {
+    let subject = git::commit_subject(dir, resolved_sha).ok();
+    let author_date = git::commit_author_date(dir, resolved_sha).ok();
+    let suggestion = match subject.as_deref() {
+        Some(subj) if !subj.is_empty() => {
+            // Search a generous window so that squash/amend chains deep in
+            // history are still found.
+            git::find_reachable_by_subject(dir, subj, author_date.as_deref(), 256)
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
+    let short_input = if input.len() > 12 {
+        &input[..12]
+    } else {
+        input
+    };
+    match (suggestion, subject) {
+        (Some(new_sha), Some(subj)) => format!(
+            "commit {short_input} is not reachable from HEAD — it was rewritten to {} ({subj:?}); retry with {}",
+            short_sha(&new_sha),
+            short_sha(&new_sha),
+        ),
+        (Some(new_sha), None) => format!(
+            "commit {short_input} is not reachable from HEAD — it was rewritten to {}; retry with {}",
+            short_sha(&new_sha),
+            short_sha(&new_sha),
+        ),
+        (None, _) => format!(
+            "commit {short_input} is not reachable from HEAD; pass a commit on the current branch"
+        ),
+    }
+}
+
+/// Resolve `rev` to a full SHA and verify it's reachable from HEAD.
+///
+/// Rejects SHAs that `git rev-parse` can resolve via the object database or
+/// reflog but which aren't part of the current branch's history. This
+/// typically happens after a prior rewrite (amend/drop/squash/reword) — the
+/// original SHA still exists in the object db, but using it as a rebase
+/// base (e.g. `target~1`) would replay the rewritten branch on top of a
+/// superseded ancestor, producing spurious conflicts.
+///
+/// Used by every command that takes a `<commit>` argument and then rebases
+/// against it: `amend --commit`, `drop`, `reword`, `squash` (target and
+/// each source), and `split`.
+fn resolve_reachable_commit(dir: &Path, rev: &str) -> Result<String, String> {
+    let sha = git::rev_parse(dir, rev)?;
+    if !git::is_reachable_from_head(dir, &sha)? {
+        return Err(stale_sha_error(dir, rev, &sha));
+    }
+    Ok(sha)
+}
+
+/// Format an amend-specific conflict error. Called while the rebase is
+/// still in progress, so it can read `.git/rebase-merge/*` state for
+/// conflicting files and the commit being replayed. The caller is
+/// expected to abort the rebase and roll back the fixup immediately
+/// after calling this.
+///
+/// Unlike `check_rebase_conflict`, the hint tells the user that the
+/// amend was rolled back (because that's what the caller is about to
+/// do), rather than suggesting `git rebase --continue`. This makes
+/// `amend --commit` atomic from the user's perspective.
+fn amend_conflict_error(dir: &Path, err: String, json: bool) -> String {
+    let in_progress = matches!(git::rebase_in_progress(dir), Ok(true));
+    let files = git::conflicting_files(dir).unwrap_or_default();
+    if !in_progress || files.is_empty() {
+        return err;
+    }
+    let current_commit = git::rebase_current_commit(dir);
+    let onto = git::rebase_onto(dir);
+    let hint = "amend could not fold cleanly; conflicting hunks left the amend \
+         aborted and history unchanged. Try staging and committing the \
+         conflicting changes separately, or resolve by hand with a manual \
+         rebase."
+        .to_string();
+    if json {
+        let result = response::ConflictError {
+            conflict: true,
+            conflicting_files: rebase::build_conflict_files(&files),
+            hint,
+            current_commit: current_commit
+                .as_ref()
+                .map(|(sha, msg)| response::CommitRef {
+                    sha: sha.clone(),
+                    message: msg.clone(),
+                    upstream_match: None,
+                }),
+            ours_theirs: onto.as_ref().map(|o| response::OursTheirs {
+                ours: format!("upstream ({o})"),
+                theirs: "your commit being replayed".to_string(),
+            }),
+        };
+        return serde_json::to_string(&result).unwrap();
+    }
+    let mut out = Output::default();
+    if let Some((sha, subject)) = &current_commit {
+        out.println(&format!("Replaying: {sha:.8} {subject}"));
+    }
+    out.println("Conflict during amend (rolled back, history unchanged):");
+    rebase::format_conflict_files(&mut out, &files);
+    if let Some(ref o) = onto {
+        out.println(&format!(
+            "Note: \"ours\" = upstream ({o}), \"theirs\" = your commit"
+        ));
+    }
+    out.println(&hint);
+    out.stdout.trim_end().to_string()
+}
+
 fn run_reword(
     cli: &Cli,
     out: &mut Output,
@@ -457,7 +601,7 @@ fn run_reword(
     commit: &str,
     message: &str,
 ) -> Result<(), String> {
-    let target = git::rev_parse(dir, commit)?;
+    let target = resolve_reachable_commit(dir, commit)?;
     let head = git::rev_parse(dir, "HEAD")?;
     if target == head {
         git::commit_amend(dir, Some(message))?;

@@ -1168,6 +1168,282 @@ fn amend_commit_rejects_message_for_non_head() {
     assert!(err.contains("cannot be used"));
 }
 
+// Regression test: `squire amend --commit <sha>` used to accept any SHA
+// that `git rev-parse` could resolve (including commits that were rewritten
+// by a prior amend and no longer appear in the current branch). The rebase
+// base was then computed from the stale SHA, producing spurious conflicts.
+// Now we reject stale SHAs with an error that points at the equivalent
+// commit on the current branch.
+#[test]
+fn amend_commit_rejects_stale_sha_after_prior_amend() {
+    let repo = TestRepo::new();
+    repo.write_file("base.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    // Commit A — target of the first amend.
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "commit A"]);
+    let a_before = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // Commit B — target of the second amend (will be rewritten by the first).
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "commit B"]);
+    let b_before = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // First amend: fold hunk for a.txt into commit A. This rewrites A, and
+    // replays B on top so B gets a new SHA.
+    repo.write_file("a-extra.txt", "extra for A\n");
+    let hunks_a = repo.diff_json();
+    let a_extra_id = hunks_a[0]["id"].as_str().unwrap();
+    repo.squire(&["amend", "--commit", &a_before[..8], a_extra_id]);
+
+    // b_before is now unreachable — it was replayed to a new SHA.
+    let head_after = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_ne!(b_before, head_after, "B should have been replayed");
+
+    // Second amend with the stale pre-rewrite SHA of B should be rejected.
+    repo.write_file("b-extra.txt", "extra for B\n");
+    let hunks_b = repo.diff_json();
+    let b_extra_id = hunks_b[0]["id"].as_str().unwrap();
+    let err = repo.squire_err(&["amend", "--commit", &b_before[..8], b_extra_id]);
+
+    // Error should call out that the SHA is unreachable and suggest the
+    // rewritten equivalent on HEAD.
+    assert!(
+        err.contains("not reachable from HEAD") || err.contains("was rewritten"),
+        "expected stale-SHA error, got: {err}"
+    );
+    // The error should point at the equivalent commit (same subject as B)
+    // so the user can retry with the right SHA.
+    assert!(
+        err.contains(&head_after[..8]) || err.contains("commit B"),
+        "error should reference the rewritten SHA or its subject, got: {err}"
+    );
+
+    // Nothing should have been committed or rebased as a side effect.
+    assert!(
+        !repo.git(&["log", "--oneline", "-1"]).contains("fixup!"),
+        "no dangling fixup commit should be left on HEAD"
+    );
+    assert!(
+        !repo.path().join(".git/rebase-merge").exists()
+            && !repo.path().join(".git/rebase-apply").exists(),
+        "no rebase should be in progress"
+    );
+}
+
+// Build a repo with three commits (base, A, B) where a prior
+// `amend --commit` has rewritten A. Returns (repo, b_before_sha) — the
+// stale pre-rewrite SHA of B that other commands should now reject.
+//
+// Structure after the helper returns:
+//   HEAD -> A' (rewritten) -> B' (rewritten) -> base
+// `b_before_sha` resolves via rev-parse (it's still in the object db) but
+// is not reachable from HEAD.
+fn build_stale_sha_scenario() -> (TestRepo, String) {
+    let repo = TestRepo::new();
+    repo.write_file("base.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    // Commit A — target of the first amend.
+    repo.write_file("a.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "commit A"]);
+    let a_before = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // Commit B — its SHA will be the stale one after A is rewritten.
+    repo.write_file("b.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "commit B"]);
+    let b_before = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // Amend an unrelated file into A so B gets replayed onto a new SHA.
+    repo.write_file("a-extra.txt", "extra for A\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    repo.squire(&["amend", "--commit", &a_before[..8], id]);
+
+    let head_after = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_ne!(b_before, head_after, "B should have been replayed");
+    (repo, b_before)
+}
+
+// Regression test: `squire drop <sha>` used to accept SHAs that rev-parse
+// could resolve but that weren't reachable from HEAD (e.g. commits
+// rewritten by a prior amend). We now reject them with a pointer to the
+// rewritten equivalent.
+#[test]
+fn drop_rejects_stale_sha_after_prior_amend() {
+    let (repo, b_before) = build_stale_sha_scenario();
+
+    // Find a hunk ID from the current (rewritten) B so the drop args
+    // are otherwise valid.
+    let b_new = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let log = repo
+        .squire(&["--json", "log", "-n", "1"])
+        .trim()
+        .to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&log).unwrap();
+    let id = parsed[0]["hunks"][0]["id"].as_str().unwrap().to_string();
+
+    let err = repo.squire_err(&["drop", &b_before[..8], &id]);
+    assert!(
+        err.contains("not reachable from HEAD") || err.contains("was rewritten"),
+        "expected stale-SHA error, got: {err}"
+    );
+    assert!(
+        err.contains(&b_new[..8]) || err.contains("commit B"),
+        "error should reference the rewritten SHA or its subject, got: {err}"
+    );
+
+    // No rebase should be in progress and HEAD should be unchanged.
+    assert!(
+        !repo.path().join(".git/rebase-merge").exists()
+            && !repo.path().join(".git/rebase-apply").exists(),
+        "no rebase should be in progress"
+    );
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), b_new);
+}
+
+// Regression test: `squire reword <sha> -m <msg>` used to accept stale
+// SHAs resolved via the object db, producing spurious conflicts when the
+// rebase base (`<sha>~1`) pointed at a superseded ancestor.
+#[test]
+fn reword_rejects_stale_sha_after_prior_amend() {
+    let (repo, b_before) = build_stale_sha_scenario();
+    let b_new = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    let err = repo.squire_err(&["reword", &b_before[..8], "-m", "new message"]);
+    assert!(
+        err.contains("not reachable from HEAD") || err.contains("was rewritten"),
+        "expected stale-SHA error, got: {err}"
+    );
+    assert!(
+        err.contains(&b_new[..8]) || err.contains("commit B"),
+        "error should reference the rewritten SHA or its subject, got: {err}"
+    );
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), b_new);
+}
+
+// Regression test: `squire split <sha>` used to accept stale SHAs, which
+// would start a rebase against a superseded ancestor.
+#[test]
+fn split_rejects_stale_sha_after_prior_amend() {
+    let (repo, b_before) = build_stale_sha_scenario();
+    let b_new = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    let err = repo.squire_err(&["split", &b_before[..8]]);
+    assert!(
+        err.contains("not reachable from HEAD") || err.contains("was rewritten"),
+        "expected stale-SHA error, got: {err}"
+    );
+    assert!(
+        err.contains(&b_new[..8]) || err.contains("commit B"),
+        "error should reference the rewritten SHA or its subject, got: {err}"
+    );
+    assert!(
+        !repo.path().join(".git/rebase-merge").exists()
+            && !repo.path().join(".git/rebase-apply").exists(),
+        "no rebase should be in progress"
+    );
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), b_new);
+}
+
+// Regression test: `squire squash <target> <sources>...` used to accept
+// stale SHAs for both the target and each source. We now reject either.
+#[test]
+fn squash_rejects_stale_target_after_prior_amend() {
+    let (repo, b_before) = build_stale_sha_scenario();
+    // Create one more commit so we have a valid source to squash from.
+    repo.write_file("c.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "commit C"]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // Stale target, valid source.
+    let err = repo.squire_err(&["squash", &b_before[..8], &head[..8]]);
+    assert!(
+        err.contains("not reachable from HEAD") || err.contains("was rewritten"),
+        "expected stale-SHA error for target, got: {err}"
+    );
+}
+
+// Regression test: a stale SHA passed as a *source* to squash is also
+// rejected (not just the target).
+#[test]
+fn squash_rejects_stale_source_after_prior_amend() {
+    let (repo, b_before) = build_stale_sha_scenario();
+    // Add a new commit so we have a valid target on HEAD.
+    repo.write_file("c.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "commit C"]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // Valid target, stale source.
+    let err = repo.squire_err(&["squash", &head[..8], &b_before[..8]]);
+    assert!(
+        err.contains("not reachable from HEAD") || err.contains("was rewritten"),
+        "expected stale-SHA error for source, got: {err}"
+    );
+}
+
+// that fails with a conflict, the `fixup!` commit that squire created on
+// HEAD before starting the rebase used to be left behind after the rebase
+// aborted internally. Now we detect the abort and roll back the fixup so
+// HEAD returns to its original state.
+#[test]
+fn amend_commit_cleans_up_fixup_on_rebase_conflict() {
+    let repo = TestRepo::new();
+    // Three commits where each touches the same file, so an autosquash
+    // rebase of the oldest will need to replay the newer ones and can
+    // conflict.
+    repo.write_file("shared.txt", "line1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    repo.write_file("shared.txt", "line1 v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write_file("shared.txt", "line1 v3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+    let head_before = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // Unstaged change to the same line — will fold into 'target' via a
+    // fixup, and then the replay of 'later' on top will conflict.
+    repo.write_file("shared.txt", "line1 v2 amended\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    // Expect an error (rebase conflict).
+    let _err = repo.squire_err(&["amend", "--commit", &target[..8], id]);
+
+    // HEAD must be back at head_before — no dangling fixup commit.
+    let head_after = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(
+        head_after, head_before,
+        "HEAD should be restored after failed amend; a dangling fixup was left behind"
+    );
+    let log = repo.git(&["log", "--oneline", "-5"]);
+    assert!(
+        !log.contains("fixup!"),
+        "no fixup! commit should remain, got log:\n{log}"
+    );
+
+    // No rebase should be in progress.
+    assert!(
+        !repo.path().join(".git/rebase-merge").exists()
+            && !repo.path().join(".git/rebase-apply").exists(),
+        "no rebase should be in progress after failed amend"
+    );
+}
+
 // --- reword ---
 
 #[test]
@@ -2003,8 +2279,10 @@ fn stash_all_hunks() {
 
 #[test]
 fn amend_conflict_returns_structured_error() {
-    // Create a repo where amending an older commit will conflict.
-    // We need 4 commits so HEAD~2 has a parent for the rebase.
+    // When amend-into-older triggers a rebase conflict, squire aborts the
+    // rebase and rolls back the pre-rebase fixup commit, so the working
+    // history is unchanged. The error message still points at the
+    // conflicting file so the user knows why the amend could not land.
     let repo = TestRepo::new();
     repo.write_file("f.txt", "base\n");
     repo.git(&["add", "."]);
@@ -2021,6 +2299,8 @@ fn amend_conflict_returns_structured_error() {
     repo.write_file("f.txt", "third\n");
     repo.git(&["add", "."]);
     repo.git(&["commit", "-m", "third"]);
+
+    let head_before = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
 
     // Create a conflicting change and try to amend it into "first" (HEAD~2)
     repo.write_file("f.txt", "conflict\n");
@@ -2034,43 +2314,27 @@ fn amend_conflict_returns_structured_error() {
     let files = parsed["conflicting_files"].as_array().unwrap();
     assert!(!files.is_empty());
     assert_eq!(files[0]["file"].as_str().unwrap(), "f.txt");
-    assert!(
-        parsed["hint"]
-            .as_str()
-            .unwrap()
-            .contains("GIT_EDITOR=true git rebase --continue")
-    );
 
-    // Clean up the paused rebase
-    repo.git(&["rebase", "--abort"]);
+    // Atomic amend: HEAD is back where it started, no dangling fixup,
+    // no rebase in progress.
+    let head_after = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(
+        head_before, head_after,
+        "amend should be atomic on conflict"
+    );
+    assert!(
+        !repo.path().join(".git/rebase-merge").exists()
+            && !repo.path().join(".git/rebase-apply").exists(),
+        "no rebase should remain in progress"
+    );
 }
 
 #[test]
 fn status_shows_conflicts_during_rebase() {
-    let repo = TestRepo::new();
-    repo.write_file("f.txt", "base\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "base"]);
+    // Use a direct git rebase to get into a mid-rebase conflict state;
+    // squire amend no longer leaves the rebase paused on conflict.
+    let repo = TestRepo::with_rebase_conflict();
 
-    repo.write_file("f.txt", "first\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "first"]);
-
-    repo.write_file("f.txt", "second\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "second"]);
-
-    repo.write_file("f.txt", "third\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "third"]);
-
-    // Try to amend into "first" (HEAD~2) to cause a conflict
-    repo.write_file("f.txt", "conflict\n");
-    let hunks = repo.diff_json();
-    let id = hunks[0]["id"].as_str().unwrap();
-    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~2", id]);
-
-    // Now check status — should show conflict info
     let output = repo.squire(&["--json", "status"]);
     let status: serde_json::Value = serde_json::from_str(&output).unwrap();
 
@@ -2087,29 +2351,11 @@ fn status_shows_conflicts_during_rebase() {
 fn diff_during_rebase_conflict_does_not_panic() {
     // Reproduce: `git diff` emits "* Unmerged path ..." lines during a
     // rebase conflict.  The patch crate panics on these.
-    let repo = TestRepo::new();
-    repo.write_file("conflict.txt", "base\n");
-    repo.write_file("other.txt", "aaa\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "base"]);
+    let repo = TestRepo::with_rebase_conflict();
 
-    repo.write_file("conflict.txt", "first\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "first"]);
-
-    repo.write_file("conflict.txt", "second\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "second"]);
-
-    // Amend into HEAD~1 to trigger a conflict on replay
-    repo.write_file("conflict.txt", "boom\n");
-    let hunks = repo.diff_json();
-    let id = hunks[0]["id"].as_str().unwrap();
-    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~1", id]);
-
-    // We're mid-rebase with a conflict on conflict.txt.
+    // We're mid-rebase with a conflict on f.txt.
     // Edit a separate file so `git diff` produces a normal diff
-    // alongside the "* Unmerged path conflict.txt" line.
+    // alongside the "* Unmerged path f.txt" line.
     repo.write_file("other.txt", "bbb\n");
 
     // `squire diff` should not panic on "* Unmerged path" lines
@@ -2131,27 +2377,7 @@ fn status_no_conflicts_field_when_clean() {
 
 #[test]
 fn status_plain_shows_conflicts() {
-    let repo = TestRepo::new();
-    repo.write_file("f.txt", "base\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "base"]);
-
-    repo.write_file("f.txt", "first\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "first"]);
-
-    repo.write_file("f.txt", "second\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "second"]);
-
-    repo.write_file("f.txt", "third\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "third"]);
-
-    repo.write_file("f.txt", "conflict\n");
-    let hunks = repo.diff_json();
-    let id = hunks[0]["id"].as_str().unwrap();
-    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~2", id]);
+    let repo = TestRepo::with_rebase_conflict();
 
     let output = repo.squire(&["status"]);
     assert!(output.contains("Conflicts"));
@@ -2462,7 +2688,7 @@ fn stage_partial_json_reports_new_hunks() {
     assert_eq!(new_hunks.len(), 1);
     assert_eq!(new_hunks[0]["file"], "f.txt");
     assert!(new_hunks[0]["id"].as_str().unwrap().len() == 8);
-    assert!(new_hunks[0]["line_hashes"].as_array().unwrap().len() > 0);
+    assert!(!new_hunks[0]["line_hashes"].as_array().unwrap().is_empty());
 
     // The new hunk ID should match what squire diff now reports
     let remaining = repo.diff_json();
@@ -2691,24 +2917,7 @@ fn rebase_ready_plain_text() {
 
 #[test]
 fn rebase_during_conflict_shows_conflicts() {
-    let repo = TestRepo::new();
-    repo.write_file("f.txt", "base\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "base"]);
-
-    repo.write_file("f.txt", "first\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "first"]);
-
-    repo.write_file("f.txt", "second\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "second"]);
-
-    // Trigger a conflict via amend into older commit.
-    repo.write_file("f.txt", "conflict\n");
-    let hunks = repo.diff_json();
-    let id = hunks[0]["id"].as_str().unwrap();
-    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~1", id]);
+    let repo = TestRepo::with_rebase_conflict();
 
     let out = repo.squire(&["--json", "rebase"]);
     let val: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -2873,7 +3082,13 @@ fn amend_conflict_plain_text_is_not_json() {
         "error should mention the conflicting file, got: {err}"
     );
 
-    repo.git(&["rebase", "--abort"]);
+    // amend is atomic — no rebase should be left in progress for the
+    // caller to abort.
+    assert!(
+        !repo.path().join(".git/rebase-merge").exists()
+            && !repo.path().join(".git/rebase-apply").exists(),
+        "no rebase should remain in progress after failed amend"
+    );
 }
 
 // ── Rename / add / delete support ──────────────────────────────────────────
@@ -2937,12 +3152,12 @@ fn stage_rename_only_hunk() {
     repo.git(&["commit", "-m", "init"]);
     // Perform rename in the working tree (delete + create)
     // then tell git about it so it detects the rename
-    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt"));
+    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt")).unwrap();
 
     let hunks = repo.diff_json();
     let arr = hunks.as_array().unwrap();
     // Should see a delete hunk and an untracked new file hunk
-    assert!(arr.len() >= 1, "expected hunks, got: {hunks}");
+    assert!(!arr.is_empty(), "expected hunks, got: {hunks}");
 
     // Stage all hunks
     let ids: Vec<String> = arr
@@ -2999,7 +3214,7 @@ fn amend_rename_into_head() {
     repo.git(&["commit", "-m", "modify"]);
 
     // Now rename in working tree
-    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt"));
+    std::fs::rename(repo.path().join("old.txt"), repo.path().join("new.txt")).unwrap();
 
     let hunks = repo.diff_json();
     let ids: Vec<String> = hunks
@@ -3714,24 +3929,7 @@ fn rebase_in_progress_no_conflicts_plain_text() {
 
 #[test]
 fn rebase_in_progress_with_conflicts_plain_text() {
-    let repo = TestRepo::new();
-    repo.write_file("f.txt", "base\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "base"]);
-
-    repo.write_file("f.txt", "first\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "first"]);
-
-    repo.write_file("f.txt", "second\n");
-    repo.git(&["add", "."]);
-    repo.git(&["commit", "-m", "second"]);
-
-    // Trigger a conflict via amend into older commit.
-    repo.write_file("f.txt", "conflict\n");
-    let hunks = repo.diff_json();
-    let id = hunks[0]["id"].as_str().unwrap();
-    let _ = repo.run_squire(&["--json", "amend", "--commit", "HEAD~1", id]);
+    let repo = TestRepo::with_rebase_conflict();
 
     let out = repo.squire(&["rebase"]);
     assert!(out.contains("conflict"), "got: {out}");
