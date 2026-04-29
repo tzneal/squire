@@ -83,7 +83,7 @@ pub struct StatusResult {
     pub conflicts: Vec<ConflictFile>,
 }
 
-// ── conflict types (shared by status, rebase, check_rebase_conflict) ──
+// ── conflict types (shared by status, rebase, atomic) ──
 
 #[derive(Debug, Serialize)]
 pub struct ConflictFile {
@@ -126,11 +126,16 @@ pub struct OursTheirs {
     pub theirs: String,
 }
 
-// ── check_rebase_conflict error ──
+// ── atomic rebase conflict error ──
 
 #[derive(Debug, Serialize)]
 pub struct ConflictError {
     pub conflict: bool,
+    /// True when the command aborted the rebase and reset HEAD to its
+    /// pre-command state. False when the rebase is paused for manual
+    /// resolution (i.e. the caller passed `--pause-on-conflict` or the
+    /// command's default is to pause).
+    pub rolled_back: bool,
     pub conflicting_files: Vec<ConflictFile>,
     pub hint: String,
     #[serde(skip_serializing_if = "Option::is_none")]

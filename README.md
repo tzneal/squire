@@ -291,19 +291,26 @@ them or wrap the recovery commands.
 
 ## Conflict reporting
 
-`amend --commit` is **atomic**: if the rebase would leave a conflict,
-squire aborts the rebase and rolls back the pre-rebase fixup commit so
-the working history is unchanged. You get a structured error naming the
-conflicting file(s), but no half-finished rebase to resolve. Retry with
-different hunks or resolve the conflict manually with your own rebase.
+All rebase-based commands (`amend --commit`, `drop`, `reword`, `squash`,
+`split`) are **atomic by default**: if the rebase would leave a conflict,
+squire aborts the rebase, rolls back any intermediate commits it created
+(e.g. the `fixup!` commit `amend` creates), and resets HEAD to where it
+was before the command ran. Any dirty working tree that was stashed on
+entry is restored. You get a structured error naming the conflicting
+file(s) with `rolled_back: true`, but no half-finished rebase to clean
+up.
 
-When a different rebase-based command (`drop`, `squash`, `reword`)
-hits a conflict, squire returns a structured error instead of forwarding
-opaque git stderr and leaves the rebase paused so you can resolve it:
+Use `--pause-on-conflict` to opt out of rollback. On conflict, the rebase
+is left paused so you can resolve the conflict by hand with `git add` +
+`GIT_EDITOR=true git rebase --continue`. The structured error reports
+`rolled_back: false` and gives continue/abort hints instead.
+
+Rolled-back error (default):
 
 ```json
 {
   "conflict": true,
+  "rolled_back": true,
   "conflicting_files": [
     { "file": "src/lib.rs", "status": "both_modified",
       "strategy": "non_trivial", "command": "show the diff and ask for guidance" }
@@ -313,22 +320,35 @@ opaque git stderr and leaves the rebase paused so you can resolve it:
     "ours": "upstream (origin/main)",
     "theirs": "your commit being replayed"
   },
-  "hint": "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel: `git rebase --abort`."
+  "hint": "amend could not complete cleanly and was rolled back; the working tree and history are unchanged. To retry and resolve by hand, re-run with `--pause-on-conflict` to leave the rebase paused on the conflicting commit. Alternative: perform a manual rebase ..."
 }
 ```
 
-Plain text output:
+Paused error (`--pause-on-conflict`):
+
+```json
+{
+  "conflict": true,
+  "rolled_back": false,
+  "conflicting_files": [ ... ],
+  "current_commit": { ... },
+  "ours_theirs": { ... },
+  "hint": "Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`. To cancel and restore the pre-command state: `git rebase --abort` followed by `git reset --hard <pre-command HEAD>`."
+}
+```
+
+Plain text output (rolled-back case):
 
 ```
 Replaying: abc1234f feat: parser
-Conflict during rebase:
+Conflict during amend (rolled back, history unchanged):
   both_modified: src/lib.rs  → show the diff and ask for guidance
 Note: "ours" = upstream (origin/main), "theirs" = your commit
-Resolve conflicts, stage with `git add`, then run `GIT_EDITOR=true git rebase --continue`.
-To cancel: `git rebase --abort`.
+amend could not complete cleanly and was rolled back ...
 ```
 
-`squire status` also reports conflicts when a rebase is paused:
+`squire status` reports conflicts when a rebase is paused (either from
+`--pause-on-conflict` or from an external `git rebase`):
 
 ```json
 {

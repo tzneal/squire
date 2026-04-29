@@ -1444,6 +1444,254 @@ fn amend_commit_cleans_up_fixup_on_rebase_conflict() {
     );
 }
 
+// When amend rolls back on conflict, the JSON error must include
+// `rolled_back: true` and the manual-recovery hint so LLM callers can
+// distinguish this from the paused (--pause-on-conflict) case.
+#[test]
+fn amend_conflict_json_has_rolled_back_field() {
+    let repo = TestRepo::new();
+    repo.write_file("shared.txt", "line1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+    repo.write_file("shared.txt", "line1 v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.write_file("shared.txt", "line1 v3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+
+    repo.write_file("shared.txt", "line1 v2 amended\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+    let err_output = repo.squire_json_err(&["--json", "amend", "--commit", &target[..8], id]);
+    let parsed: serde_json::Value = serde_json::from_str(&err_output).unwrap();
+    assert_eq!(
+        parsed["rolled_back"].as_bool(),
+        Some(true),
+        "default amend must report rolled_back:true, got: {parsed}"
+    );
+    assert!(
+        parsed["hint"]
+            .as_str()
+            .unwrap()
+            .contains("--pause-on-conflict"),
+        "hint must mention --pause-on-conflict, got: {parsed}"
+    );
+}
+
+// With --pause-on-conflict, amend leaves the rebase paused instead of
+// rolling back, so the LLM can resolve the conflict by hand.
+#[test]
+fn amend_pause_on_conflict_leaves_rebase_paused() {
+    let repo = TestRepo::new();
+    repo.write_file("shared.txt", "line1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+    repo.write_file("shared.txt", "line1 v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.write_file("shared.txt", "line1 v3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+
+    repo.write_file("shared.txt", "line1 v2 amended\n");
+    let hunks = repo.diff_json();
+    let id = hunks[0]["id"].as_str().unwrap();
+
+    let err_output = repo.squire_json_err(&[
+        "--json",
+        "amend",
+        "--commit",
+        &target[..8],
+        "--pause-on-conflict",
+        id,
+    ]);
+    let parsed: serde_json::Value = serde_json::from_str(&err_output).unwrap();
+    assert_eq!(
+        parsed["rolled_back"].as_bool(),
+        Some(false),
+        "--pause-on-conflict must report rolled_back:false"
+    );
+    assert!(
+        parsed["hint"]
+            .as_str()
+            .unwrap()
+            .contains("rebase --continue"),
+        "paused hint must point at git rebase --continue"
+    );
+    // Rebase should still be in progress.
+    assert!(
+        repo.path().join(".git/rebase-merge").exists()
+            || repo.path().join(".git/rebase-apply").exists(),
+        "--pause-on-conflict should leave the rebase paused"
+    );
+    // Clean up so TestRepo drop doesn't leave stale rebase dir.
+    let _ = std::process::Command::new("git")
+        .args(["rebase", "--abort"])
+        .current_dir(repo.path())
+        .output();
+}
+
+// Build a three-commit history where dropping hunks from the middle
+// commit will conflict when the later commit is replayed on top.
+// Returns (repo, target_sha, hunk_id_to_drop, pre_command_head_sha).
+fn build_drop_conflict_scenario() -> (TestRepo, String, String, String) {
+    let repo = TestRepo::new();
+    repo.write_file("shared.txt", "line1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    // Target commit: changes the single line. We'll try to drop this
+    // change; the later commit depends on it.
+    repo.write_file("shared.txt", "line1 v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // Find the hunk ID for the target's change so we can pass it to
+    // `squire drop`.
+    let log = repo.squire(&["--json", "log", "-n", "1"]);
+    let parsed: serde_json::Value = serde_json::from_str(&log).unwrap();
+    let hunk_id = parsed[0]["hunks"][0]["id"].as_str().unwrap().to_string();
+
+    // Later commit: further modifies the same line. Dropping the target's
+    // change will break this commit's replay.
+    repo.write_file("shared.txt", "line1 v3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+    let head_before = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    (repo, target, hunk_id, head_before)
+}
+
+// By default (no --pause-on-conflict), `drop` on a non-HEAD commit whose
+// changes conflict with later commits must roll back to the pre-command
+// HEAD and leave no rebase in progress.
+#[test]
+fn drop_conflict_rolls_back_by_default() {
+    let (repo, target, hunk_id, head_before) = build_drop_conflict_scenario();
+
+    let err_output = repo.squire_json_err(&["--json", "drop", &target[..8], &hunk_id]);
+    let parsed: serde_json::Value = serde_json::from_str(&err_output).unwrap();
+    assert_eq!(parsed["conflict"].as_bool(), Some(true));
+    assert_eq!(parsed["rolled_back"].as_bool(), Some(true));
+
+    let head_after = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head_before, head_after, "drop should be atomic on conflict");
+    assert!(
+        !repo.path().join(".git/rebase-merge").exists()
+            && !repo.path().join(".git/rebase-apply").exists(),
+        "no rebase should be in progress after rolled-back drop"
+    );
+}
+
+// With --pause-on-conflict, `drop` leaves the rebase paused so the
+// caller can resolve by hand.
+#[test]
+fn drop_pause_on_conflict_leaves_rebase_paused() {
+    let (repo, target, hunk_id, _head_before) = build_drop_conflict_scenario();
+
+    let err_output = repo.squire_json_err(&[
+        "--json",
+        "drop",
+        &target[..8],
+        "--pause-on-conflict",
+        &hunk_id,
+    ]);
+    let parsed: serde_json::Value = serde_json::from_str(&err_output).unwrap();
+    assert_eq!(parsed["rolled_back"].as_bool(), Some(false));
+    assert!(
+        repo.path().join(".git/rebase-merge").exists()
+            || repo.path().join(".git/rebase-apply").exists(),
+        "--pause-on-conflict should leave the rebase paused"
+    );
+    // Clean up.
+    let _ = std::process::Command::new("git")
+        .args(["rebase", "--abort"])
+        .current_dir(repo.path())
+        .output();
+}
+
+// Build a history where squashing a non-adjacent commit into an earlier
+// target will conflict: the source's diff was computed against an
+// intermediate commit, so reapplying it directly on top of the target
+// produces a merge conflict.
+// Returns (repo, target_sha, source_sha, pre_command_head_sha).
+fn build_squash_conflict_scenario() -> (TestRepo, String, String, String) {
+    let repo = TestRepo::new();
+    repo.write_file("shared.txt", "base\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+
+    // Target: line becomes "a".
+    repo.write_file("shared.txt", "a\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target (a)"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    // Intermediate commit: line becomes "b".
+    repo.write_file("shared.txt", "b\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "middle (b)"]);
+
+    // Source: line becomes "c". Source's diff is "b -> c". When folded
+    // into target (which has "a"), the apply conflicts because there is
+    // no "b" there.
+    repo.write_file("shared.txt", "c\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "source (c)"]);
+    let source = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    let head_before = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    (repo, target, source, head_before)
+}
+
+#[test]
+fn squash_conflict_rolls_back_by_default() {
+    let (repo, target, source, head_before) = build_squash_conflict_scenario();
+
+    let err_output = repo.squire_json_err(&["--json", "squash", &target[..8], &source[..8]]);
+    let parsed: serde_json::Value = serde_json::from_str(&err_output).unwrap();
+    assert_eq!(parsed["conflict"].as_bool(), Some(true));
+    assert_eq!(parsed["rolled_back"].as_bool(), Some(true));
+
+    let head_after = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(
+        head_before, head_after,
+        "squash should be atomic on conflict"
+    );
+    assert!(
+        !repo.path().join(".git/rebase-merge").exists()
+            && !repo.path().join(".git/rebase-apply").exists(),
+        "no rebase should be in progress after rolled-back squash"
+    );
+}
+
+#[test]
+fn squash_pause_on_conflict_leaves_rebase_paused() {
+    let (repo, target, source, _head_before) = build_squash_conflict_scenario();
+
+    let err_output = repo.squire_json_err(&[
+        "--json",
+        "squash",
+        "--pause-on-conflict",
+        &target[..8],
+        &source[..8],
+    ]);
+    let parsed: serde_json::Value = serde_json::from_str(&err_output).unwrap();
+    assert_eq!(parsed["rolled_back"].as_bool(), Some(false));
+    assert!(
+        repo.path().join(".git/rebase-merge").exists()
+            || repo.path().join(".git/rebase-apply").exists(),
+        "--pause-on-conflict should leave the rebase paused"
+    );
+    let _ = std::process::Command::new("git")
+        .args(["rebase", "--abort"])
+        .current_dir(repo.path())
+        .output();
+}
+
 // --- reword ---
 
 #[test]

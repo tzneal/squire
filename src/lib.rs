@@ -1,3 +1,4 @@
+pub mod atomic;
 pub mod cleanup;
 pub mod cli;
 pub mod diff;
@@ -9,8 +10,8 @@ pub mod response;
 
 use cli::{Cli, Command};
 use resolve::{
-    apply_resolved, check_rebase_conflict, find_hunk, residual_hunks, resolve_hunks,
-    resolve_selector, split_last_arg, stage_hunks, stage_hunks_or_cached,
+    apply_resolved, find_hunk, residual_hunks, resolve_hunks, resolve_selector, split_last_arg,
+    stage_hunks, stage_hunks_or_cached,
 };
 use std::fmt::Write;
 use std::path::Path;
@@ -170,6 +171,7 @@ fn run_squash(
     out: &mut Output,
     dir: &Path,
     message: Option<&str>,
+    pause_on_conflict: bool,
     commits: &[String],
 ) -> Result<(), String> {
     if !git::is_clean(dir)? {
@@ -180,15 +182,18 @@ fn run_squash(
         .iter()
         .map(|c| resolve_reachable_commit(dir, c))
         .collect::<Result<_, _>>()?;
-    git::rebase_squash(dir, &target, &sources, message)
-        .map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
+    let sources_len = sources.len();
+    let mode = atomic_mode(pause_on_conflict);
+    atomic::run_atomic(dir, mode, "squash", cli.json, |_ctx| {
+        git::rebase_squash(dir, &target, &sources, message)
+    })?;
     emit_result(
         out,
         cli.json,
-        response::ActionCount::Squashed(sources.len()),
+        response::ActionCount::Squashed(sources_len),
         &format!(
             "Squashed {} commit(s) into {}",
-            sources.len(),
+            sources_len,
             short_sha(&target)
         ),
         &[],
@@ -251,16 +256,30 @@ fn truncate_commit_hunks(sha: &str, hunks: &mut [diff::HunkInfo], max_lines: usi
     }
 }
 
-fn run_split(out: &mut Output, dir: &Path, commit: &str) -> Result<(), String> {
+fn run_split(
+    cli: &Cli,
+    out: &mut Output,
+    dir: &Path,
+    commit: &str,
+    pause_on_conflict: bool,
+) -> Result<(), String> {
     if !git::is_clean(dir)? {
         return Err("split requires a clean working tree".to_string());
     }
     let target = resolve_reachable_commit(dir, commit)?;
     let head = git::rev_parse(dir, "HEAD")?;
     if target == head {
+        // HEAD path: plain mixed reset, no rebase.
         git::reset_mixed(dir, "HEAD~1")?;
     } else {
-        git::rebase_edit_and_reset(dir, &target)?;
+        // Non-HEAD path: rebase-edit stops at the target, then we reset
+        // it so its changes land back in the working tree. If the
+        // rebase conflicts while replaying intermediate commits, roll
+        // back (or pause, per flag) so the user's tree is unchanged.
+        let mode = atomic_mode(pause_on_conflict);
+        atomic::run_atomic(dir, mode, "split", cli.json, |_ctx| {
+            git::rebase_edit_and_reset(dir, &target)
+        })?;
     }
     out.println("Ready to split. Use `squire diff` and `squire stage` to selectively commit.");
     Ok(())
@@ -349,34 +368,60 @@ fn run_drop(
     out: &mut Output,
     dir: &Path,
     commit: &str,
+    pause_on_conflict: bool,
     hunk_ids: &[String],
 ) -> Result<(), String> {
     let target = resolve_reachable_commit(dir, commit)?;
     let head = git::rev_parse(dir, "HEAD")?;
     let is_head = target == head;
-    if !is_head {
-        if !git::is_clean(dir)? {
-            return Err("drop requires a clean working tree for non-HEAD commits".to_string());
-        }
-        git::rebase_edit(dir, &target).map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
+    if is_head {
+        // Simple path: no rebase, just reverse-apply and amend.
+        let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
+        let hunks = diff::parse_diff(&raw)?;
+        let (selected, _) = resolve_hunks(&hunks, hunk_ids, false)?;
+        apply_resolved(dir, &selected, &["--cached", "--reverse"])?;
+        git::commit_amend_allow_empty(dir)?;
+        emit_result(
+            out,
+            cli.json,
+            response::ActionCount::Dropped(selected.len()),
+            &format!(
+                "Dropped {} hunk(s) from {}",
+                selected.len(),
+                short_sha(&target)
+            ),
+            &[],
+        );
+        return Ok(());
     }
-    // After rebase_edit, the target is now HEAD
-    let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
-    let hunks = diff::parse_diff(&raw)?;
-    let (selected, _) = resolve_hunks(&hunks, hunk_ids, false)?;
-    apply_resolved(dir, &selected, &["--cached", "--reverse"])?;
-    git::commit_amend_allow_empty(dir)?;
-    if !is_head {
+    if !git::is_clean(dir)? {
+        return Err("drop requires a clean working tree for non-HEAD commits".to_string());
+    }
+    // Non-HEAD path: rebase-edit → reverse-apply → amend → continue.
+    // Every step mutates HEAD or the rebase state. Wrap the whole thing
+    // in an atomic scope so a failure at any step rolls back cleanly.
+    let mode = atomic_mode(pause_on_conflict);
+    let mut selected_count = 0usize;
+    atomic::run_atomic(dir, mode, "drop", cli.json, |_ctx| {
+        git::rebase_edit(dir, &target)?;
+        // After rebase_edit, the target is now HEAD (detached).
+        let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
+        let hunks = diff::parse_diff(&raw)?;
+        let (selected, _) = resolve_hunks(&hunks, hunk_ids, false)?;
+        selected_count = selected.len();
+        apply_resolved(dir, &selected, &["--cached", "--reverse"])?;
+        git::commit_amend_allow_empty(dir)?;
         git::checkout_head(dir)?;
-        git::rebase_continue(dir).map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
-    }
+        git::rebase_continue(dir)?;
+        Ok(())
+    })?;
     emit_result(
         out,
         cli.json,
-        response::ActionCount::Dropped(selected.len()),
+        response::ActionCount::Dropped(selected_count),
         &format!(
             "Dropped {} hunk(s) from {}",
-            selected.len(),
+            selected_count,
             short_sha(&target)
         ),
         &[],
@@ -409,6 +454,7 @@ fn run_amend(
     dir: &Path,
     message: Option<&str>,
     commit: Option<&str>,
+    pause_on_conflict: bool,
     hunk_ids: &[String],
 ) -> Result<(), String> {
     let total = stage_hunks_or_cached(dir, hunk_ids)?;
@@ -422,48 +468,18 @@ fn run_amend(
             return Err("-m cannot be used with --commit for non-HEAD targets".to_string());
         } else {
             amended_target = short_sha(&target).to_string();
-            // Snapshot HEAD before we create the fixup so we can detect
-            // and roll it back if the rebase aborts.
-            let head_before_fixup = head.clone();
-            git::commit_fixup(dir, &target)?;
-            let dirty = !git::is_clean(dir)?;
-            if dirty {
-                git::stash_push(dir, None)?;
-            }
-            if let Err(e) = git::rebase_autosquash(dir, &target) {
-                // The rebase failed. Three things need to happen, in order:
-                //   1. Capture any conflict info while the rebase is still
-                //      in progress, because the abort in step 2 deletes the
-                //      `.git/rebase-merge/*` state the formatter reads.
-                //   2. If a rebase is still in progress (conflict), abort it
-                //      so we leave the repo in a clean state.
-                //   3. Roll back the fixup commit we created on HEAD before
-                //      starting the rebase — otherwise the user is left with
-                //      a dangling `fixup! ...` commit.
-                //   4. Restore the stashed dirty tree if we stashed one.
-                // This makes `amend --commit` atomic: either it succeeds or
-                // the working history is unchanged.
-                let formatted = amend_conflict_error(dir, e, cli.json);
-                if let Ok(true) = git::rebase_in_progress(dir) {
-                    let _ = git::rebase_abort(dir);
-                }
-                // Only roll back if HEAD currently points at the fixup commit
-                // we created (HEAD moved forward by exactly one commit whose
-                // parent is head_before_fixup). This guards against clobbering
-                // state we didn't create.
-                if let Ok(parent) = git::rev_parse(dir, "HEAD^")
-                    && parent == head_before_fixup
-                {
-                    let _ = git::reset_hard(dir, &head_before_fixup);
-                }
-                if dirty {
-                    let _ = git::stash_pop(dir);
-                }
-                return Err(formatted);
-            }
-            if dirty {
-                git::stash_pop(dir)?;
-            }
+            let mode = atomic_mode(pause_on_conflict);
+            atomic::run_atomic(dir, mode, "amend", cli.json, |ctx| {
+                // Create the fixup commit from the staged index first,
+                // then stash any remaining unstaged changes so the
+                // rebase sees a clean tree. Order matters: stashing
+                // before commit_fixup would wipe the index we just
+                // staged via `stage_hunks_or_cached`.
+                git::commit_fixup(dir, &target)?;
+                ctx.stash_unstaged_if_dirty()?;
+                git::rebase_autosquash(dir, &target)?;
+                Ok(())
+            })?;
         }
     } else {
         git::commit_amend(dir, message)?;
@@ -476,6 +492,17 @@ fn run_amend(
         &[],
     );
     Ok(())
+}
+
+/// Helper: convert the `--pause-on-conflict` boolean into the
+/// corresponding [`atomic::AtomicMode`]. Centralizing this keeps the
+/// mapping consistent across commands.
+fn atomic_mode(pause_on_conflict: bool) -> atomic::AtomicMode {
+    if pause_on_conflict {
+        atomic::AtomicMode::PauseOnConflict
+    } else {
+        atomic::AtomicMode::Atomic
+    }
 }
 
 /// Build an error message for a commit SHA that resolves but isn't
@@ -537,69 +564,13 @@ fn resolve_reachable_commit(dir: &Path, rev: &str) -> Result<String, String> {
     Ok(sha)
 }
 
-/// Format an amend-specific conflict error. Called while the rebase is
-/// still in progress, so it can read `.git/rebase-merge/*` state for
-/// conflicting files and the commit being replayed. The caller is
-/// expected to abort the rebase and roll back the fixup immediately
-/// after calling this.
-///
-/// Unlike `check_rebase_conflict`, the hint tells the user that the
-/// amend was rolled back (because that's what the caller is about to
-/// do), rather than suggesting `git rebase --continue`. This makes
-/// `amend --commit` atomic from the user's perspective.
-fn amend_conflict_error(dir: &Path, err: String, json: bool) -> String {
-    let in_progress = matches!(git::rebase_in_progress(dir), Ok(true));
-    let files = git::conflicting_files(dir).unwrap_or_default();
-    if !in_progress || files.is_empty() {
-        return err;
-    }
-    let current_commit = git::rebase_current_commit(dir);
-    let onto = git::rebase_onto(dir);
-    let hint = "amend could not fold cleanly; conflicting hunks left the amend \
-         aborted and history unchanged. Try staging and committing the \
-         conflicting changes separately, or resolve by hand with a manual \
-         rebase."
-        .to_string();
-    if json {
-        let result = response::ConflictError {
-            conflict: true,
-            conflicting_files: rebase::build_conflict_files(&files),
-            hint,
-            current_commit: current_commit
-                .as_ref()
-                .map(|(sha, msg)| response::CommitRef {
-                    sha: sha.clone(),
-                    message: msg.clone(),
-                    upstream_match: None,
-                }),
-            ours_theirs: onto.as_ref().map(|o| response::OursTheirs {
-                ours: format!("upstream ({o})"),
-                theirs: "your commit being replayed".to_string(),
-            }),
-        };
-        return serde_json::to_string(&result).unwrap();
-    }
-    let mut out = Output::default();
-    if let Some((sha, subject)) = &current_commit {
-        out.println(&format!("Replaying: {sha:.8} {subject}"));
-    }
-    out.println("Conflict during amend (rolled back, history unchanged):");
-    rebase::format_conflict_files(&mut out, &files);
-    if let Some(ref o) = onto {
-        out.println(&format!(
-            "Note: \"ours\" = upstream ({o}), \"theirs\" = your commit"
-        ));
-    }
-    out.println(&hint);
-    out.stdout.trim_end().to_string()
-}
-
 fn run_reword(
     cli: &Cli,
     out: &mut Output,
     dir: &Path,
     commit: &str,
     message: &str,
+    pause_on_conflict: bool,
 ) -> Result<(), String> {
     let target = resolve_reachable_commit(dir, commit)?;
     let head = git::rev_parse(dir, "HEAD")?;
@@ -608,8 +579,10 @@ fn run_reword(
     } else if !git::is_clean(dir)? {
         return Err("reword requires a clean working tree for non-HEAD commits".to_string());
     } else {
-        git::rebase_reword(dir, &target, message)
-            .map_err(|e| check_rebase_conflict(dir, e, cli.json))?;
+        let mode = atomic_mode(pause_on_conflict);
+        atomic::run_atomic(dir, mode, "reword", cli.json, |_ctx| {
+            git::rebase_reword(dir, &target, message)
+        })?;
     }
     if cli.json {
         let result = response::RewordResult {
@@ -785,6 +758,7 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
         Command::Amend {
             message,
             commit,
+            pause_on_conflict,
             hunk_ids,
         } => run_amend(
             cli,
@@ -792,17 +766,38 @@ pub fn run(cli: &Cli, command: &Command, dir: &Path) -> Result<Output, String> {
             dir,
             message.as_deref(),
             commit.as_deref(),
+            *pause_on_conflict,
             hunk_ids,
         )?,
-        Command::Reword { commit, message } => run_reword(cli, &mut out, dir, commit, message)?,
-        Command::Drop { commit, hunk_ids } => run_drop(cli, &mut out, dir, commit, hunk_ids)?,
+        Command::Reword {
+            commit,
+            message,
+            pause_on_conflict,
+        } => run_reword(cli, &mut out, dir, commit, message, *pause_on_conflict)?,
+        Command::Drop {
+            commit,
+            pause_on_conflict,
+            hunk_ids,
+        } => run_drop(cli, &mut out, dir, commit, *pause_on_conflict, hunk_ids)?,
         Command::Status => run_status(cli, &mut out, dir)?,
         Command::Log { n, max_hunk_lines } => run_log(cli, &mut out, dir, *n, *max_hunk_lines)?,
-        Command::Split { commit } => run_split(&mut out, dir, commit)?,
+        Command::Split {
+            commit,
+            pause_on_conflict,
+        } => run_split(cli, &mut out, dir, commit, *pause_on_conflict)?,
         Command::Cleanup { master } => cleanup::run_cleanup(cli, &mut out, dir, master.as_deref())?,
-        Command::Squash { message, commits } => {
-            run_squash(cli, &mut out, dir, message.as_deref(), commits)?
-        }
+        Command::Squash {
+            message,
+            pause_on_conflict,
+            commits,
+        } => run_squash(
+            cli,
+            &mut out,
+            dir,
+            message.as_deref(),
+            *pause_on_conflict,
+            commits,
+        )?,
         Command::Seqedit { args } => run_seqedit(args)?,
         Command::Stash { message, hunk_ids } => {
             run_stash(cli, &mut out, dir, message.as_deref(), hunk_ids)?
