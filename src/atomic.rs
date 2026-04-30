@@ -101,16 +101,24 @@ impl StateSnapshot {
         // deleted old.txt and added new.txt as a tracked file).
         let cached = filter_patch_for_existing_files(dir, &self.cached_patch)?;
         let unstaged = filter_patch_for_existing_files(dir, &self.unstaged_patch)?;
-        // Apply unstaged patches first via --3way (needed because
-        // context is relative to old HEAD). --3way stages the result,
-        // so we reset the index afterward to keep them unstaged.
+        // Apply cached patches first to both index and worktree. This
+        // must come before unstaged patches because when the same file
+        // has both staged and unstaged changes, the unstaged diff's
+        // context lines reference the staged (index) content — so the
+        // worktree must contain the staged content before the unstaged
+        // patch can apply cleanly.
+        if !cached.trim().is_empty() {
+            git::apply_patch_tolerant(dir, &cached, &["--index"])?;
+        }
+        // Now apply unstaged patches to the worktree only via --3way.
+        // --3way may stage the result, so we reset the index afterward
+        // and re-apply the cached patches to the index only.
         if !unstaged.trim().is_empty() {
             git::apply_patch_tolerant(dir, &unstaged, &[])?;
             git::reset_mixed_head(dir)?;
-        }
-        // Now apply cached patches to both index and worktree.
-        if !cached.trim().is_empty() {
-            git::apply_patch_tolerant(dir, &cached, &["--index"])?;
+            if !cached.trim().is_empty() {
+                git::apply_patch_tolerant(dir, &cached, &["--cached"])?;
+            }
         }
         git::restore_untracked(dir, &self.untracked)?;
         Ok(())
