@@ -1,26 +1,34 @@
-//! Atomic rebase scope: wrap a multi-step rebase operation so that on
-//! failure the repository is left exactly as it was before the operation
-//! started. If the caller opts in to `PauseOnConflict` mode, conflicts
-//! leave the rebase paused instead of rolling back so the user can
-//! resolve by hand.
+//! Atomic scope: wrap a multi-step operation so that on failure the
+//! repository is left EXACTLY as it was before the operation started —
+//! including HEAD, the index, the working tree, and untracked files.
 //!
-//! This module centralizes HEAD snapshotting, stash management, rebase
-//! abort, and the conflict-error formatting that used to live ad-hoc in
-//! each rebase-based command (`amend --commit`, `drop`, `reword`,
-//! `squash`, `split`).
+//! The central guarantee is the no-data-loss invariant:
+//!
+//!   > Anything the user did not explicitly ask squire to mutate must
+//!   > be byte-for-byte identical to pre-command state.
+//!
+//! To uphold that guarantee, every mutating command runs under
+//! [`run_atomic`], which captures a full pre-command snapshot before
+//! the body runs and restores it on any error path. If the caller opts
+//! in to `PauseOnConflict` mode, rebase conflicts leave the rebase
+//! paused instead of rolling back so the user can resolve by hand.
+//!
+//! This module centralizes HEAD/index/worktree/untracked snapshotting,
+//! rebase abort, and the conflict-error formatting that used to live
+//! ad-hoc in each rebase-based command (`amend --commit`, `drop`,
+//! `reword`, `squash`, `split`).
 
 use crate::Output;
 use crate::git;
 use crate::rebase;
 use crate::response;
-use std::cell::Cell;
 use std::path::Path;
 
 /// How a rebase failure should be handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomicMode {
-    /// On any error (including conflicts), abort the rebase and reset
-    /// HEAD to its pre-scope state. Default.
+    /// On any error (including conflicts), abort the rebase and restore
+    /// the pre-scope snapshot. Default.
     Atomic,
     /// On a rebase conflict, leave the rebase paused so the user can
     /// resolve by hand. Non-conflict errors still trigger a full
@@ -29,52 +37,106 @@ pub enum AtomicMode {
     PauseOnConflict,
 }
 
-/// Context passed to the scope body. Exposes a helper for stashing
-/// dirty unstaged state such that the scope knows to restore it on
-/// success or failure. A future addition may expose the pre-scope HEAD
-/// sha for callers that need it.
-pub struct AtomicCtx<'a> {
-    dir: &'a Path,
-    /// Set by the body via `stash_unstaged_if_dirty` to inform the scope
-    /// that a stash was pushed and must be popped on exit (success) or
-    /// after rollback (failure).
-    stash_pushed: Cell<bool>,
+/// Full pre-command state snapshot. Captures:
+///   - HEAD sha
+///   - Cached portion as a patch (diff --cached)
+///   - Unstaged portion as a patch (diff, not including untracked)
+///   - Untracked files (path + contents)
+///   - A stash commit sha holding the whole tracked state, for
+///     failure-path rollback via `reset --hard HEAD && stash apply`
+///
+/// The patch-based fields power the success path (reset-to-new-HEAD
+/// then explicitly re-apply cached/unstaged/untracked, skipping
+/// content now in HEAD). The stash sha powers the failure rollback
+/// path (restore exact pre-command state onto pre-command HEAD).
+#[derive(Debug)]
+pub struct StateSnapshot {
+    head: String,
+    stash_sha: Option<String>,
+    cached_patch: String,
+    unstaged_patch: String,
+    untracked: Vec<(String, Vec<u8>)>,
 }
 
-impl<'a> AtomicCtx<'a> {
-    /// If the working tree currently has unstaged changes, `git stash
-    /// push -u` them and record that fact. The scope will restore the
-    /// stash on both success and rollback.
+impl StateSnapshot {
+    /// Capture the current repo state.
+    pub fn capture(dir: &Path) -> Result<Self, String> {
+        let head = git::rev_parse(dir, "HEAD")?;
+        let stash_sha = git::capture_snapshot(dir)?;
+        let cached_patch = git::diff(dir, &["--cached".to_string()])?;
+        let unstaged_patch = git::diff(dir, &[])?;
+        let untracked = git::list_untracked_with_contents(dir)?;
+        Ok(Self {
+            head,
+            stash_sha,
+            cached_patch,
+            unstaged_patch,
+            untracked,
+        })
+    }
+
+    /// Restore the captured state onto the original HEAD. Used on
+    /// rollback.
+    pub fn restore(&self, dir: &Path) -> Result<(), String> {
+        git::restore_snapshot(dir, &self.head, self.stash_sha.as_deref(), &self.untracked)
+    }
+
+    /// Apply the user's non-targeted state on top of the current HEAD
+    /// (assumed to be fresh from the command body's new commit). Parts
+    /// of the snapshot that match what the body put into HEAD are
+    /// skipped:
+    ///   - Patch hunks referencing files absent from the new HEAD are
+    ///     dropped (because the body's mutation has already consumed
+    ///     them, typically via delete or rename).
+    ///   - Patch hunks already present in the new HEAD are dropped via
+    ///     `git apply --3way`.
+    ///   - Untracked files now tracked in HEAD at the same path are
+    ///     skipped by `restore_untracked`.
     ///
-    /// Why not stash on entry? Because some commands (notably
-    /// `amend --commit`) need to commit the already-staged index as a
-    /// fixup *before* the remaining unstaged state is stashed — stashing
-    /// first would wipe the index they need. Letting the body call this
-    /// at the right point preserves that ordering.
-    pub fn stash_unstaged_if_dirty(&self) -> Result<(), String> {
-        if !git::is_clean(self.dir)? {
-            git::stash_push(self.dir, None)?;
-            self.stash_pushed.set(true);
+    /// Precondition: working tree matches current HEAD exactly.
+    pub fn restore_onto_new_head(&self, dir: &Path) -> Result<(), String> {
+        // Filter each patch to drop hunks whose old-file or target
+        // file is no longer present in the new HEAD. Those represent
+        // changes the body has already absorbed (e.g. a rename that
+        // deleted old.txt and added new.txt as a tracked file).
+        let cached = filter_patch_for_existing_files(dir, &self.cached_patch)?;
+        let unstaged = filter_patch_for_existing_files(dir, &self.unstaged_patch)?;
+        // Apply unstaged patches first via --3way (needed because
+        // context is relative to old HEAD). --3way stages the result,
+        // so we reset the index afterward to keep them unstaged.
+        if !unstaged.trim().is_empty() {
+            git::apply_patch_tolerant(dir, &unstaged, &[])?;
+            git::reset_mixed_head(dir)?;
         }
+        // Now apply cached patches to both index and worktree.
+        if !cached.trim().is_empty() {
+            git::apply_patch_tolerant(dir, &cached, &["--index"])?;
+        }
+        git::restore_untracked(dir, &self.untracked)?;
         Ok(())
     }
 }
 
-/// Run `body` under an atomic rebase scope.
+/// Context passed to the scope body. Previously held stash state; now
+/// a marker type kept for API compatibility. Future additions can expose
+/// snapshot accessors for bodies that need them.
+pub struct AtomicCtx;
+
+/// Run `body` under an atomic scope.
 ///
-/// Before calling `body`:
-///   1. Snapshot HEAD.
+/// Before calling `body`: capture a full [`StateSnapshot`].
 ///
 /// After `body` returns:
-///   - `Ok`: pop the stash if the body pushed one, and return Ok.
+///   - `Ok`: return Ok (snapshot is discarded; the body's changes are
+///     committed).
 ///   - `Err(e)` with a rebase conflict and `mode == PauseOnConflict`:
 ///     leave the rebase paused; return a formatted conflict error with
-///     `rolled_back: false`. The stash (if any) stays pushed — popping
-///     it into a paused rebase would be chaos. The user gets told.
-///   - `Err(e)` otherwise: abort any in-progress rebase, reset HEAD to
-///     the snapshot, pop the stash (best-effort). Return a formatted
-///     error. If the original error was a rebase conflict, the error
-///     has `rolled_back: true` and includes a hint for manual recovery.
+///     `rolled_back: false`. The snapshot is not restored because the
+///     user is taking over.
+///   - `Err(e)` otherwise: abort any in-progress rebase, restore the
+///     snapshot (HEAD + index + worktree + untracked), and return a
+///     formatted error. If the original error was a rebase conflict,
+///     the error has `rolled_back: true`.
 ///
 /// `command_name` is used in error prose (e.g. "Conflict during amend").
 pub fn run_atomic<F>(
@@ -87,27 +149,82 @@ pub fn run_atomic<F>(
 where
     F: FnOnce(&AtomicCtx) -> Result<(), String>,
 {
-    let head_sha = git::rev_parse(dir, "HEAD")?;
-    let ctx = AtomicCtx {
-        dir,
-        stash_pushed: Cell::new(false),
-    };
+    let snapshot = StateSnapshot::capture(dir)?;
+    let ctx = AtomicCtx;
     match body(&ctx) {
-        Ok(()) => {
-            if ctx.stash_pushed.get() {
-                git::stash_pop(dir)?;
-            }
-            Ok(())
-        }
-        Err(e) => Err(handle_failure(
-            dir,
-            mode,
-            command_name,
-            json,
-            &head_sha,
-            ctx.stash_pushed.get(),
-            e,
-        )),
+        Ok(()) => Ok(()),
+        Err(e) => Err(handle_failure(dir, mode, command_name, json, &snapshot, e)),
+    }
+}
+
+/// Run a state-isolating operation: a command whose effect should be
+/// scoped to exactly the mutations performed by `body`, preserving all
+/// other user state (staged content, unstaged edits, untracked files).
+///
+/// Use this for:
+///   - HEAD-amend commands (`amend HEAD`, `drop HEAD`, `reword HEAD`)
+///     so that pre-existing staged content is not silently folded into
+///     the amended commit.
+///   - Non-HEAD rebase commands (`amend --commit`, `drop`, `reword`,
+///     `squash`, `split`) so that dirty user state is preserved across
+///     the rebase without requiring a clean-tree precondition.
+///
+/// Algorithm:
+///   1. Capture pre-command snapshot S (for both rollback and success
+///      restoration).
+///   2. Reset HEAD (hard) + clean -fd. Working tree now matches HEAD
+///      exactly; user state is temporarily held in S.
+///   3. Call `body`. The body is expected to produce a new HEAD (via
+///      `commit --amend`, fixup + autosquash, rebase, etc.).
+///   4. `git reset --hard HEAD` + `git clean -fd`. Working tree now
+///      matches the NEW HEAD. This clears any untracked files the body
+///      may have left behind.
+///   5. Apply S on top of new HEAD. This performs a three-way merge
+///      that re-creates the user's pre-command state on top of the new
+///      history. Mutations that went into HEAD become no-ops in the
+///      resulting diff.
+///   6. On any failure in 2–5: restore S to the original HEAD.
+///
+/// The body MUST NOT rely on pre-existing index or working tree state,
+/// because step 2 has cleared it. Bodies that need to apply specific
+/// hunks must capture them (via [`collect_named_hunks`]) BEFORE calling
+/// this function, then apply them inside the body.
+pub fn run_isolated<F>(
+    dir: &Path,
+    mode: AtomicMode,
+    command_name: &str,
+    json: bool,
+    body: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&AtomicCtx) -> Result<(), String>,
+{
+    let snapshot = StateSnapshot::capture(dir)?;
+    let ctx = AtomicCtx;
+
+    // Wrap the whole operation so any failure triggers rollback.
+    let result = (|| -> Result<(), String> {
+        // Step 2: reset clean to HEAD.
+        git::reset_hard(dir, &snapshot.head)?;
+        git::clean_fd(dir)?;
+        // Step 3: body applies named hunks and produces new HEAD.
+        body(&ctx)?;
+        // Step 4: reset clean to new HEAD. This clears any untracked
+        // files the body may have left behind.
+        git::reset_hard(dir, "HEAD")?;
+        git::clean_fd(dir)?;
+        // Step 5: restore user's non-targeted state on top of new HEAD,
+        // using patch-based application that tolerates hunks already
+        // present (three-way merge). This preserves staged content,
+        // unstaged edits, and untracked files that weren't consumed
+        // by the body.
+        snapshot.restore_onto_new_head(dir)?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => Err(handle_failure(dir, mode, command_name, json, &snapshot, e)),
     }
 }
 
@@ -119,8 +236,7 @@ fn handle_failure(
     mode: AtomicMode,
     command_name: &str,
     json: bool,
-    head_snapshot: &str,
-    stash_pushed: bool,
+    snapshot: &StateSnapshot,
     raw_err: String,
 ) -> String {
     // Capture conflict state *before* we touch the rebase. `rebase_abort`
@@ -145,23 +261,19 @@ fn handle_failure(
 
     if rollback {
         // Order matters: abort any in-progress rebase first (otherwise
-        // reset --hard refuses while in a rebase), then reset HEAD to the
-        // snapshot, then pop the stash.
+        // reset --hard refuses while in a rebase), then restore the
+        // full pre-command snapshot.
         if in_progress {
             let _ = git::rebase_abort(dir);
         }
-        // Reset HEAD unconditionally: the scope owns every mutation that
-        // happened between `begin` and `fail`, so the snapshot is the
-        // source of truth. This kills any fixup commit, partial amend, or
-        // intermediate state the body may have created.
-        let _ = git::reset_hard(dir, head_snapshot);
-        if stash_pushed {
-            let _ = git::stash_pop(dir);
-        }
+        // Restore unconditionally: the scope owns every mutation that
+        // happened between capture and failure, so the snapshot is the
+        // source of truth. This restores HEAD + index + worktree +
+        // untracked files exactly.
+        let _ = snapshot.restore(dir);
     }
     // In the PauseOnConflict-conflict case we do nothing: the rebase
-    // stays paused, the stash stays pushed (we'll tell the user about it
-    // in the hint), and the user takes over from here.
+    // stays paused, and the user takes over from here.
 
     if !is_conflict {
         // Not a rebase conflict — no structured error to build, just
@@ -176,7 +288,6 @@ fn handle_failure(
         &files,
         current_commit.as_ref(),
         onto.as_deref(),
-        stash_pushed,
     )
 }
 
@@ -189,9 +300,8 @@ fn format_conflict_error(
     files: &[(String, String)],
     current_commit: Option<&(String, String)>,
     onto: Option<&str>,
-    stash_pushed: bool,
 ) -> String {
-    let hint = conflict_hint(command_name, rolled_back, stash_pushed);
+    let hint = conflict_hint(command_name, rolled_back);
 
     if json {
         let result = response::ConflictError {
@@ -236,7 +346,7 @@ fn format_conflict_error(
 /// the LLM how to either retry with --pause-on-conflict or do a manual
 /// rebase. For paused conflicts we give the standard continue/abort
 /// commands.
-fn conflict_hint(command_name: &str, rolled_back: bool, stash_pushed: bool) -> String {
+fn conflict_hint(command_name: &str, rolled_back: bool) -> String {
     if rolled_back {
         format!(
             "{command_name} could not complete cleanly and was rolled back; \
@@ -248,19 +358,78 @@ fn conflict_hint(command_name: &str, rolled_back: bool, stash_pushed: bool) -> S
              `git add`, `GIT_EDITOR=true git rebase --continue`)."
         )
     } else {
-        let mut hint = String::from(
+        String::from(
             "Resolve conflicts, stage with `git add`, then run \
              `GIT_EDITOR=true git rebase --continue`. To cancel and \
              restore the pre-command state: `git rebase --abort` \
              followed by `git reset --hard <pre-command HEAD>`.",
-        );
-        if stash_pushed {
-            hint.push_str(
-                " Note: your dirty working tree was stashed before the \
-                 rebase — after the rebase completes or is aborted, run \
-                 `git stash pop` to restore it.",
-            );
-        }
-        hint
+        )
     }
+}
+
+/// Filter a unified-diff patch to drop entire file-pair sections where
+/// the old file (the `a/...` side) is not present in the current index.
+/// This handles the case where the body's mutation consumed a file
+/// (e.g. a rename that deleted the old path) — the snapshot's patch
+/// still references the old path, but applying it would fail because
+/// the file no longer exists.
+///
+/// Works on raw diff text (preserving `index` lines needed by --3way)
+/// by splitting on `diff --git` boundaries and checking each section's
+/// `--- a/<path>` line.
+fn filter_patch_for_existing_files(dir: &std::path::Path, patch: &str) -> Result<String, String> {
+    if patch.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let mut result = String::new();
+    // Split on "diff --git " boundaries. Each section starts with
+    // "diff --git a/... b/..." and includes all subsequent lines until
+    // the next "diff --git" or end of string.
+    let sections: Vec<&str> = {
+        let mut starts = Vec::new();
+        for (i, _) in patch.match_indices("\ndiff --git ") {
+            starts.push(i + 1); // skip the leading \n
+        }
+        if patch.starts_with("diff --git ") {
+            starts.insert(0, 0);
+        }
+        let mut secs = Vec::new();
+        for (i, &start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).copied().unwrap_or(patch.len());
+            secs.push(&patch[start..end]);
+        }
+        secs
+    };
+    for section in sections {
+        // Find the "--- a/<path>" line to determine the old file.
+        let old_file = section
+            .lines()
+            .find(|l| l.starts_with("--- "))
+            .and_then(|l| {
+                l.strip_prefix("--- a/").or_else(|| {
+                    if l == "--- /dev/null" {
+                        Some("/dev/null")
+                    } else {
+                        None
+                    }
+                })
+            });
+        match old_file {
+            Some("/dev/null") => {
+                // Pure addition — always keep.
+                result.push_str(section);
+            }
+            Some(path) => {
+                if git::file_in_index(dir, path) {
+                    result.push_str(section);
+                }
+                // else: file consumed by body, drop section
+            }
+            None => {
+                // Can't determine old file — keep to be safe.
+                result.push_str(section);
+            }
+        }
+    }
+    Ok(result)
 }

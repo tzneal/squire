@@ -330,8 +330,30 @@ pub fn reconstruct_patch(hunks: &[&HunkInfo]) -> String {
             hunk.old_file != hunk.file && hunk.old_file != "/dev/null" && hunk.file != "/dev/null";
         if key != current_key {
             current_key = key;
+            // Emit a `diff --git` header at the start of each file-pair.
+            // Without this, `git apply` can't tell where one file's
+            // hunks end and the next begin, especially for adjacent
+            // additions and deletions (which look like two consecutive
+            // `---`/`+++` blocks). Renames get additional "rename
+            // from/to" metadata; plain delete/add/modify get just the
+            // header.
+            let header_old = if hunk.old_file == "/dev/null" {
+                hunk.file.as_str()
+            } else {
+                hunk.old_file.as_str()
+            };
+            let header_new = if hunk.file == "/dev/null" {
+                hunk.old_file.as_str()
+            } else {
+                hunk.file.as_str()
+            };
+            patch.push_str(&format!("diff --git a/{header_old} b/{header_new}\n"));
+            if hunk.old_file == "/dev/null" {
+                patch.push_str("new file mode 100644\n");
+            } else if hunk.file == "/dev/null" {
+                patch.push_str("deleted file mode 100644\n");
+            }
             if is_rename {
-                patch.push_str(&format!("diff --git a/{} b/{}\n", hunk.old_file, hunk.file));
                 if hunk.content.is_empty() {
                     patch.push_str("similarity index 100%\n");
                 }

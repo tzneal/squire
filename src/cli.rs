@@ -227,7 +227,8 @@ COMMANDS
 
   squire squash [-m <message>] [--pause-on-conflict] <target> <source>...
     Fold source commits into the target commit. The target's message
-    is kept; use -m to replace it. Requires a clean working tree.
+    is kept; use -m to replace it. Any unstaged or staged changes
+    are preserved across the operation.
     Uses seqedit + non-interactive rebase under the hood.
     Atomic on conflict by default (pass --pause-on-conflict to leave
     the rebase paused). Rejects SHAs unreachable from HEAD for both
@@ -542,8 +543,8 @@ pub enum Command {
     /// If -m is given, replaces the commit message; otherwise keeps it.
     ///
     /// --commit is atomic by default: on conflict, squire aborts the
-    /// rebase, rolls back the pre-rebase fixup, and restores any stashed
-    /// dirty tree so the working history is unchanged. Pass
+    /// rebase and restores the full pre-command state (HEAD, index,
+    /// working tree, and untracked files) so nothing is lost. Pass
     /// --pause-on-conflict to leave the rebase paused instead so you can
     /// resolve by hand.
     ///
@@ -578,7 +579,7 @@ pub enum Command {
     ///
     /// For HEAD: delegates to `git commit --amend -m`.
     /// For older commits: uses a non-interactive rebase with reword.
-    /// Requires a clean working tree (for non-HEAD targets).
+    /// Any unstaged or staged changes are preserved across the operation.
     ///
     /// Non-HEAD reword is atomic by default: on conflict during the
     /// replay of subsequent commits, squire aborts the rebase and
@@ -613,7 +614,8 @@ pub enum Command {
     ///
     /// For HEAD: reverse-applies and amends.
     /// For older commits: uses rebase to pause, reverse-apply, amend,
-    /// and continue. Requires a clean working tree.
+    /// and continue. Any unstaged or staged changes are preserved
+    /// across the operation.
     ///
     /// Non-HEAD drop is atomic by default: on conflict during the
     /// rebase replay, squire aborts the rebase and resets HEAD to its
@@ -741,7 +743,7 @@ pub enum Command {
     /// Folds one or more source commits into a target commit using a
     /// non-interactive rebase. The target commit's message is kept;
     /// source commits are discarded. Use -m to replace the message.
-    /// Requires a clean working tree.
+    /// Any unstaged or staged changes are preserved across the operation.
     ///
     /// Atomic by default: on conflict during the rebase, squire aborts
     /// the rebase and resets HEAD to its pre-command state. Pass
