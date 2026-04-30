@@ -147,17 +147,30 @@ fn run_stash(
         Some(diff::reconstruct_patch(&keep))
     };
 
-    // Wrap the three-step mutation (reverse-apply keep, stash push,
-    // forward-apply keep) in run_atomic so a failure mid-sequence
+    // Capture any pre-existing staged content so we can restore it
+    // after the stash. `git stash push -u` captures the index too,
+    // which would silently stash staged content the user didn't name.
+    let cached_patch = git::diff(dir, &["--cached".to_string()])?;
+
+    // Wrap the mutation in run_atomic so a failure mid-sequence
     // restores the working tree instead of leaving kept hunks stripped
     // with nothing stashed.
     atomic::run_atomic(dir, atomic::AtomicMode::Atomic, "stash", cli.json, |_ctx| {
         if let Some(ref p) = keep_patch {
             git::apply_worktree(dir, p)?;
         }
+        // Reset the index to HEAD so the stash only captures worktree
+        // changes (the selected hunks), not pre-existing staged content.
+        if !cached_patch.trim().is_empty() {
+            git::reset_mixed_head(dir)?;
+        }
         git::stash_push(dir, message)?;
         if let Some(ref p) = keep_patch {
             git::apply_worktree_forward(dir, p)?;
+        }
+        // Restore the pre-existing staged content.
+        if !cached_patch.trim().is_empty() {
+            git::apply_patch_tolerant(dir, &cached_patch, &["--index"])?;
         }
         Ok(())
     })?;
