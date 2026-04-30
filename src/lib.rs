@@ -147,17 +147,20 @@ fn run_stash(
         Some(diff::reconstruct_patch(&keep))
     };
 
-    if let Some(ref p) = keep_patch {
-        git::apply_worktree(dir, p)?;
-    }
-
-    let stash_result = git::stash_push(dir, message);
-
-    if let Some(ref p) = keep_patch {
-        git::apply_worktree_forward(dir, p)?;
-    }
-
-    stash_result?;
+    // Wrap the three-step mutation (reverse-apply keep, stash push,
+    // forward-apply keep) in run_atomic so a failure mid-sequence
+    // restores the working tree instead of leaving kept hunks stripped
+    // with nothing stashed.
+    atomic::run_atomic(dir, atomic::AtomicMode::Atomic, "stash", cli.json, |_ctx| {
+        if let Some(ref p) = keep_patch {
+            git::apply_worktree(dir, p)?;
+        }
+        git::stash_push(dir, message)?;
+        if let Some(ref p) = keep_patch {
+            git::apply_worktree_forward(dir, p)?;
+        }
+        Ok(())
+    })?;
     let new_hunks = residual_hunks(dir, had_partial, &affected_files, false)?;
     emit_result(
         out,
@@ -177,9 +180,6 @@ fn run_squash(
     pause_on_conflict: bool,
     commits: &[String],
 ) -> Result<(), String> {
-    if !git::is_clean(dir)? {
-        return Err("squash requires a clean working tree".to_string());
-    }
     let target = resolve_reachable_commit(dir, &commits[0])?;
     let sources: Vec<String> = commits[1..]
         .iter()
@@ -187,7 +187,11 @@ fn run_squash(
         .collect::<Result<_, _>>()?;
     let sources_len = sources.len();
     let mode = atomic_mode(pause_on_conflict);
-    atomic::run_atomic(dir, mode, "squash", cli.json, |_ctx| {
+    // Use run_isolated so the rebase runs on a clean tree while the
+    // user's pre-command state is preserved and restored on top of the
+    // new HEAD. Removes the old "requires a clean working tree"
+    // precondition that forced users to stash manually.
+    atomic::run_isolated(dir, mode, "squash", cli.json, |_ctx| {
         git::rebase_squash(dir, &target, &sources, message)
     })?;
     emit_result(
@@ -266,6 +270,12 @@ fn run_split(
     commit: &str,
     pause_on_conflict: bool,
 ) -> Result<(), String> {
+    // split's output is a dirty working tree (the target's diff becomes
+    // unstaged). Preserving pre-command dirty state across a split is
+    // semantically muddy (we'd have to merge the target's diff into an
+    // already-dirty tree), so we keep the clean-tree precondition for
+    // split. Other commands no longer need it because their output IS
+    // a commit, and the snapshot mechanism restores user state on top.
     if !git::is_clean(dir)? {
         return Err("split requires a clean working tree".to_string());
     }
@@ -377,47 +387,37 @@ fn run_drop(
     let target = resolve_reachable_commit(dir, commit)?;
     let head = git::rev_parse(dir, "HEAD")?;
     let is_head = target == head;
-    if is_head {
-        // Simple path: no rebase, just reverse-apply and amend.
-        let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
-        let hunks = diff::parse_diff(&raw)?;
-        let (selected, _) = resolve_hunks(&hunks, hunk_ids, false)?;
-        apply_resolved(dir, &selected, &["--cached", "--reverse"])?;
-        git::commit_amend_allow_empty(dir)?;
-        emit_result(
-            out,
-            cli.json,
-            response::ActionCount::Dropped(selected.len()),
-            &format!(
-                "Dropped {} hunk(s) from {}",
-                selected.len(),
-                short_sha(&target)
-            ),
-            &[],
-        );
-        return Ok(());
-    }
-    if !git::is_clean(dir)? {
-        return Err("drop requires a clean working tree for non-HEAD commits".to_string());
-    }
-    // Non-HEAD path: rebase-edit → reverse-apply → amend → continue.
-    // Every step mutates HEAD or the rebase state. Wrap the whole thing
-    // in an atomic scope so a failure at any step rolls back cleanly.
     let mode = atomic_mode(pause_on_conflict);
-    let mut selected_count = 0usize;
-    atomic::run_atomic(dir, mode, "drop", cli.json, |_ctx| {
-        git::rebase_edit(dir, &target)?;
-        // After rebase_edit, the target is now HEAD (detached).
-        let raw = git::diff(dir, &["HEAD~1".to_string(), "HEAD".to_string()])?;
-        let hunks = diff::parse_diff(&raw)?;
-        let (selected, _) = resolve_hunks(&hunks, hunk_ids, false)?;
-        selected_count = selected.len();
-        apply_resolved(dir, &selected, &["--cached", "--reverse"])?;
-        git::commit_amend_allow_empty(dir)?;
-        git::checkout_head(dir)?;
-        git::rebase_continue(dir)?;
-        Ok(())
-    })?;
+    // Resolve drop hunks against the target commit's diff. Drop removes
+    // hunks FROM the commit, so the patches we need are from the
+    // commit's own diff, not from the working tree.
+    let (drop_patch, selected_count) = collect_drop_patch(dir, &target, hunk_ids)?;
+    if is_head {
+        // HEAD path: isolated-head-op preserves user's pre-command state
+        // across a reverse-apply-and-amend. Without it, a dirty index
+        // would silently get folded into the amended commit.
+        atomic::run_isolated(dir, mode, "drop", cli.json, |_ctx| {
+            // Reverse-apply the patch to the index (remove the hunks).
+            git::apply_cached(dir, &drop_patch, true)?;
+            git::commit_amend_allow_empty(dir)?;
+            Ok(())
+        })?;
+    } else {
+        // Non-HEAD path: rebase-edit → reverse-apply → amend → continue.
+        // Wrap in run_isolated so the rebase runs on a clean tree while
+        // any pre-existing user state (staged hunks for other commits,
+        // unstaged edits, untracked files) is preserved and restored
+        // on top of the new HEAD.
+        atomic::run_isolated(dir, mode, "drop", cli.json, |_ctx| {
+            git::rebase_edit(dir, &target)?;
+            // After rebase_edit, the target is now HEAD (detached).
+            git::apply_cached(dir, &drop_patch, true)?;
+            git::commit_amend_allow_empty(dir)?;
+            git::checkout_head(dir)?;
+            git::rebase_continue(dir)?;
+            Ok(())
+        })?;
+    }
     emit_result(
         out,
         cli.json,
@@ -430,6 +430,22 @@ fn run_drop(
         &[],
     );
     Ok(())
+}
+
+/// Resolve `hunk_ids` against the diff of a specific commit and return
+/// a patch (plus count) ready for reverse-application via
+/// `git apply --cached --reverse`. Used by `drop`.
+fn collect_drop_patch(
+    dir: &Path,
+    target: &str,
+    hunk_ids: &[String],
+) -> Result<(String, usize), String> {
+    let raw = git::diff(dir, &[format!("{target}~1"), target.to_string()])?;
+    let hunks = diff::parse_diff(&raw)?;
+    let (selected, _) = resolve_hunks(&hunks, hunk_ids, false)?;
+    let refs: Vec<&diff::HunkInfo> = selected.iter().collect();
+    let patch = diff::reconstruct_patch(&refs);
+    Ok((patch, selected.len()))
 }
 
 fn run_commit(
@@ -460,33 +476,40 @@ fn run_amend(
     pause_on_conflict: bool,
     hunk_ids: &[String],
 ) -> Result<(), String> {
-    let total = stage_hunks_or_cached(dir, hunk_ids)?;
-    let mut amended_target = String::from("HEAD");
-    if let Some(rev) = commit {
-        let head = git::rev_parse(dir, "HEAD")?;
-        let target = resolve_reachable_commit(dir, rev)?;
-        if target == head {
-            git::commit_amend(dir, message)?;
-        } else if message.is_some() {
-            return Err("-m cannot be used with --commit for non-HEAD targets".to_string());
-        } else {
-            amended_target = short_sha(&target).to_string();
-            let mode = atomic_mode(pause_on_conflict);
-            atomic::run_atomic(dir, mode, "amend", cli.json, |ctx| {
-                // Create the fixup commit from the staged index first,
-                // then stash any remaining unstaged changes so the
-                // rebase sees a clean tree. Order matters: stashing
-                // before commit_fixup would wipe the index we just
-                // staged via `stage_hunks_or_cached`.
-                git::commit_fixup(dir, &target)?;
-                ctx.stash_unstaged_if_dirty()?;
-                git::rebase_autosquash(dir, &target)?;
-                Ok(())
-            })?;
-        }
-    } else {
-        git::commit_amend(dir, message)?;
+    // Resolve the target before we touch anything: this ensures a bad
+    // --commit ref fails cleanly without mutating state.
+    let head = git::rev_parse(dir, "HEAD")?;
+    let target = match commit {
+        Some(rev) => resolve_reachable_commit(dir, rev)?,
+        None => head.clone(),
+    };
+    let is_head = target == head;
+    if !is_head && message.is_some() {
+        return Err("-m cannot be used with --commit for non-HEAD targets".to_string());
     }
+    // Collect the set of hunks the user named, resolved against the
+    // CURRENT working state (index + worktree + untracked) *before* we
+    // enter the isolated scope. The scope will reset the tree to HEAD,
+    // so we need the patches captured now.
+    let amend_hunks = collect_named_hunks(dir, hunk_ids)?;
+    let total = hunk_ids.len();
+    let amended_target = if is_head {
+        String::from("HEAD")
+    } else {
+        short_sha(&target).to_string()
+    };
+    let mode = atomic_mode(pause_on_conflict);
+    atomic::run_isolated(dir, mode, "amend", cli.json, |_ctx| {
+        // Apply the named hunks to the (clean) index + worktree.
+        apply_hunks_to_index_and_worktree(dir, &amend_hunks)?;
+        if is_head {
+            git::commit_amend(dir, message)?;
+        } else {
+            git::commit_fixup(dir, &target)?;
+            git::rebase_autosquash(dir, &target)?;
+        }
+        Ok(())
+    })?;
     emit_result(
         out,
         cli.json,
@@ -506,6 +529,81 @@ fn atomic_mode(pause_on_conflict: bool) -> atomic::AtomicMode {
     } else {
         atomic::AtomicMode::Atomic
     }
+}
+
+/// A hunk resolved against the user's current working state, captured
+/// before any isolating reset. Used by `run_amend` / `run_drop_head` /
+/// etc. to re-apply only the named hunks after the tree has been reset
+/// to HEAD, so the rest of the user's state is preserved.
+struct NamedHunk {
+    hunk: diff::HunkInfo,
+}
+
+/// Resolve `hunk_ids` against the current index + worktree + untracked
+/// state. Hunks may come from either the cached diff or the unstaged
+/// diff; each input ID is matched against whichever side contains it.
+/// Line selectors (`hunk:a,b`) are honored.
+///
+/// This function does NOT mutate the repo. The returned hunks are
+/// self-contained patches that can be applied against HEAD after a
+/// `reset --hard HEAD` has been done.
+fn collect_named_hunks(dir: &Path, hunk_ids: &[String]) -> Result<Vec<NamedHunk>, String> {
+    let (unstaged_raw, _) = diff_with_untracked(dir, &[])?;
+    let unstaged = diff::parse_diff(&unstaged_raw)?;
+    let cached_raw = git::diff(dir, &["--cached".to_string()])?;
+    let cached = diff::parse_diff(&cached_raw)?;
+
+    // Partition args by whether they name a cached or unstaged hunk.
+    let mut cached_args: Vec<String> = Vec::new();
+    let mut unstaged_args: Vec<String> = Vec::new();
+    for arg in hunk_ids {
+        let id = arg.split_once(':').map_or(arg.as_str(), |(id, _)| id);
+        if find_hunk(&unstaged, id).is_ok() {
+            unstaged_args.push(arg.clone());
+        } else if find_hunk(&cached, id).is_ok() {
+            cached_args.push(arg.clone());
+        } else {
+            return Err(format!("hunk {id} not found"));
+        }
+    }
+
+    let mut out = Vec::with_capacity(hunk_ids.len());
+    if !unstaged_args.is_empty() {
+        let (resolved, _) = resolve_hunks(&unstaged, &unstaged_args, false)?;
+        for h in resolved {
+            out.push(NamedHunk { hunk: h });
+        }
+    }
+    if !cached_args.is_empty() {
+        let (resolved, _) = resolve_hunks(&cached, &cached_args, false)?;
+        for h in resolved {
+            out.push(NamedHunk { hunk: h });
+        }
+    }
+    Ok(out)
+}
+
+/// Apply the named hunks to both the index and the working tree. The
+/// caller is responsible for ensuring the tree matches HEAD before
+/// calling this (usually via `git reset --hard HEAD` + `git clean -fd`).
+///
+/// After this returns successfully, the index + working tree contain
+/// exactly the named hunks as changes vs HEAD. Ready for
+/// `git commit --amend` or `git commit --fixup`.
+///
+/// Uses `git apply --index` which updates both the index and working
+/// tree atomically in a single call. A previous version used two
+/// separate `--cached` + worktree apply calls, which broke for renames
+/// (after the first `--cached` apply, old.txt was no longer in the
+/// index, so the second apply couldn't find it there).
+fn apply_hunks_to_index_and_worktree(dir: &Path, hunks: &[NamedHunk]) -> Result<(), String> {
+    if hunks.is_empty() {
+        return Ok(());
+    }
+    let refs: Vec<&diff::HunkInfo> = hunks.iter().map(|nh| &nh.hunk).collect();
+    let patch = diff::reconstruct_patch(&refs);
+    git::apply(dir, &patch, &["--index"])?;
+    Ok(())
 }
 
 /// Build an error message for a commit SHA that resolves but isn't
@@ -577,13 +675,22 @@ fn run_reword(
 ) -> Result<(), String> {
     let target = resolve_reachable_commit(dir, commit)?;
     let head = git::rev_parse(dir, "HEAD")?;
+    let mode = atomic_mode(pause_on_conflict);
     if target == head {
-        git::commit_amend(dir, Some(message))?;
-    } else if !git::is_clean(dir)? {
-        return Err("reword requires a clean working tree for non-HEAD commits".to_string());
+        // HEAD path: isolated-head-op resets the index to HEAD before
+        // the amend, so pre-existing staged content does NOT silently
+        // get folded into the reworded commit. reword is a message-only
+        // operation.
+        atomic::run_isolated(dir, mode, "reword", cli.json, |_ctx| {
+            git::commit_amend(dir, Some(message))
+        })?;
     } else {
-        let mode = atomic_mode(pause_on_conflict);
-        atomic::run_atomic(dir, mode, "reword", cli.json, |_ctx| {
+        // Non-HEAD: run_isolated resets the tree so git rebase can run,
+        // then restores the user's pre-command state on top. This
+        // makes the workflow "reword an old commit while carrying
+        // unrelated edits" work without a stash dance, and also
+        // guarantees a rollback on conflict preserves that state.
+        atomic::run_isolated(dir, mode, "reword", cli.json, |_ctx| {
             git::rebase_reword(dir, &target, message)
         })?;
     }
@@ -622,27 +729,40 @@ fn run_revert(cli: &Cli, out: &mut Output, dir: &Path, hunk_ids: &[String]) -> R
             cached_args.push(arg.clone());
         }
     }
+    // Wrap the mutating portion in run_atomic so a failure in the
+    // second step (e.g. apply_worktree failing after apply_cached
+    // succeeded for cached hunks) rolls back the partial mutation
+    // instead of leaving the index in an inconsistent state.
     let mut had_partial = false;
     let mut affected_files: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if !unstaged_args.is_empty() {
-        let (resolved, partial) = resolve_hunks(&unstaged, &unstaged_args, true)?;
-        had_partial |= partial;
-        for h in &resolved {
-            affected_files.insert(h.file.clone());
-        }
-        apply_resolved(dir, &resolved, &["--reverse"])?;
-    }
-    if !cached_args.is_empty() {
-        let (resolved, partial) = resolve_hunks(&cached, &cached_args, true)?;
-        had_partial |= partial;
-        for h in &resolved {
-            affected_files.insert(h.file.clone());
-        }
-        let refs: Vec<&diff::HunkInfo> = resolved.iter().collect();
-        let patch = diff::reconstruct_patch(&refs);
-        git::apply_cached(dir, &patch, true)?;
-        git::apply_worktree(dir, &patch)?;
-    }
+    atomic::run_atomic(
+        dir,
+        atomic::AtomicMode::Atomic,
+        "revert",
+        cli.json,
+        |_ctx| {
+            if !unstaged_args.is_empty() {
+                let (resolved, partial) = resolve_hunks(&unstaged, &unstaged_args, true)?;
+                had_partial |= partial;
+                for h in &resolved {
+                    affected_files.insert(h.file.clone());
+                }
+                apply_resolved(dir, &resolved, &["--reverse"])?;
+            }
+            if !cached_args.is_empty() {
+                let (resolved, partial) = resolve_hunks(&cached, &cached_args, true)?;
+                had_partial |= partial;
+                for h in &resolved {
+                    affected_files.insert(h.file.clone());
+                }
+                let refs: Vec<&diff::HunkInfo> = resolved.iter().collect();
+                let patch = diff::reconstruct_patch(&refs);
+                git::apply_cached(dir, &patch, true)?;
+                git::apply_worktree(dir, &patch)?;
+            }
+            Ok(())
+        },
+    )?;
     let file_refs: std::collections::HashSet<&str> =
         affected_files.iter().map(|s| s.as_str()).collect();
     let new_hunks = residual_hunks(dir, had_partial, &file_refs, false)?;

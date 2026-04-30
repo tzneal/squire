@@ -1744,8 +1744,11 @@ fn reword_json_output() {
 }
 
 #[test]
-fn reword_older_commit_dirty_tree_fails() {
+fn reword_older_commit_dirty_tree_succeeds_and_preserves_state() {
     let repo = TestRepo::new();
+    repo.write_file("seed.txt", "s\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "seed"]);
     repo.write_file("a.txt", "a\n");
     repo.git(&["add", "."]);
     repo.git(&["commit", "-m", "first"]);
@@ -1754,8 +1757,12 @@ fn reword_older_commit_dirty_tree_fails() {
     repo.git(&["commit", "-m", "second"]);
     repo.write_file("a.txt", "dirty\n");
 
-    let err = repo.squire_err(&["reword", "HEAD~1", "-m", "nope"]);
-    assert!(err.contains("clean working tree"));
+    let pre_status = repo.git(&["status", "--porcelain"]);
+    repo.squire(&["reword", "HEAD~1", "-m", "reworded"]);
+    let post_status = repo.git(&["status", "--porcelain"]);
+    assert_eq!(pre_status, post_status, "dirty state must survive reword");
+    let msg = repo.git(&["log", "--format=%s", "-1", "HEAD~1"]);
+    assert_eq!(msg.trim(), "reworded");
 }
 
 // --- drop ---
@@ -1863,7 +1870,7 @@ fn drop_json_output() {
 }
 
 #[test]
-fn drop_older_commit_dirty_tree_fails() {
+fn drop_older_commit_dirty_tree_preserves_state() {
     let repo = TestRepo::new();
     repo.write_file("a.txt", "a\n");
     repo.write_file("b.txt", "b\n");
@@ -1873,13 +1880,21 @@ fn drop_older_commit_dirty_tree_fails() {
     repo.write_file("b.txt", "b2\n");
     repo.git(&["add", "."]);
     repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
     repo.write_file("c.txt", "c\n");
     repo.git(&["add", "."]);
     repo.git(&["commit", "-m", "third"]);
     repo.write_file("a.txt", "dirty\n");
 
-    let err = repo.squire_err(&["drop", "HEAD~1", "244cca06"]);
-    assert!(err.contains("clean working tree"));
+    let pre_status = repo.git(&["status", "--porcelain"]);
+    // Get a hunk ID from the target commit.
+    let hunks_out = repo.squire(&["--json", "diff", "HEAD~2", "HEAD~1"]);
+    let hunks: serde_json::Value = serde_json::from_str(&hunks_out).unwrap();
+    let id = hunks[0]["id"].as_str().unwrap().to_string();
+
+    repo.squire(&["drop", &target[..8], &id]);
+    let post_status = repo.git(&["status", "--porcelain"]);
+    assert_eq!(pre_status, post_status, "dirty state must survive drop");
 }
 
 // --- hunk ID prefix matching ---
@@ -2449,8 +2464,11 @@ fn squash_multiple_sources() {
 }
 
 #[test]
-fn squash_dirty_working_tree_fails() {
+fn squash_dirty_working_tree_preserves_state() {
     let repo = TestRepo::new();
+    repo.write_file("seed.txt", "s\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "seed"]);
     repo.write_file("a.txt", "a\n");
     repo.git(&["add", "."]);
     repo.git(&["commit", "-m", "first"]);
@@ -2459,9 +2477,12 @@ fn squash_dirty_working_tree_fails() {
     repo.git(&["commit", "-m", "second"]);
 
     repo.write_file("a.txt", "dirty\n");
+    let pre_status = repo.git(&["status", "--porcelain"]);
 
-    let err = repo.squire_err(&["squash", "HEAD~1", "HEAD"]);
-    assert!(err.contains("clean working tree"));
+    repo.squire(&["squash", "HEAD~1", "HEAD"]);
+
+    let post_status = repo.git(&["status", "--porcelain"]);
+    assert_eq!(pre_status, post_status, "dirty state must survive squash");
 }
 
 #[test]
@@ -4492,4 +4513,409 @@ fn rebase_detects_master_via_remote_head() {
     let val: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(val["state"], "ready");
     assert_eq!(val["upstream"], "origin/main");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// No-data-loss invariants for mutating commands.
+//
+// Every command that can mutate the working tree, index, or HEAD must
+// leave UNRELATED state byte-for-byte identical to pre-command state.
+// "Unrelated" = anything the user did not explicitly pass as a hunk ID
+// (or, for message-only commands like reword, everything).
+//
+// These tests assert the invariant across rollback paths and across the
+// successful-path scoping. They are the regression suite for five bugs:
+//   1. amend --commit <non-HEAD>: rollback lost staged-by-squire hunks
+//   2. amend HEAD: folded pre-existing staged content into the amend
+//   3. drop HEAD: folded pre-existing staged content into the amend
+//   4. reword HEAD: folded pre-existing staged content into the reword
+//   5. revert (staged hunks): two-step apply failed partially
+// ─────────────────────────────────────────────────────────────────────
+
+/// Snapshot the full state of a repo into a comparable structure so
+/// tests can assert that unrelated state survives a command.
+fn snapshot_state(repo: &TestRepo) -> (String, String, Vec<(String, String)>) {
+    // (HEAD sha, porcelain status, list of (path, content) for every
+    // present file including untracked).
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let status = repo.git(&["status", "--porcelain"]);
+    let mut files: Vec<(String, String)> = Vec::new();
+    fn walk(root: &std::path::Path, dir: &std::path::Path, files: &mut Vec<(String, String)>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let rel = p.strip_prefix(root).unwrap();
+                if rel.starts_with(".git") {
+                    continue;
+                }
+                if p.is_dir() {
+                    walk(root, &p, files);
+                } else if p.is_file() {
+                    let content = std::fs::read_to_string(&p).unwrap_or_default();
+                    files.push((rel.to_string_lossy().to_string(), content));
+                }
+            }
+        }
+    }
+    walk(repo.path(), repo.path(), &mut files);
+    files.sort();
+    (head, status, files)
+}
+
+/// Bug 1: `squire amend --commit <non-HEAD>` that hits a rebase conflict
+/// MUST restore the working tree, index, and untracked files to the
+/// exact pre-command state. Previously it would silently drop the hunks
+/// that were staged by `stage_hunks_or_cached` before the atomic scope.
+#[test]
+fn amend_commit_rollback_preserves_staged_hunks() {
+    let repo = TestRepo::new();
+    repo.write_file("shared.txt", "L1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+    repo.write_file("shared.txt", "L1 v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "target"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.write_file("shared.txt", "L1 v3\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "later"]);
+
+    // User edits that should survive the rollback:
+    //   - unstaged edit on shared.txt (targeted by the amend)
+    //   - unstaged edit on side.txt (not targeted)
+    //   - untracked fresh.txt (not targeted)
+    repo.write_file("shared.txt", "L1 v2 amended\n");
+    repo.write_file("side.txt", "side work\n");
+    repo.git(&["add", "side.txt"]);
+    repo.write_file("side.txt", "side work + more\n");
+    repo.write_file("fresh.txt", "untracked\n");
+
+    let pre = snapshot_state(&repo);
+
+    let hunks = repo.diff_json();
+    let id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "shared.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    // Expect an error (rebase conflict).
+    let _err = repo.squire_err(&["amend", "--commit", &target[..8], id]);
+
+    let post = snapshot_state(&repo);
+    assert_eq!(pre.0, post.0, "HEAD changed after rollback");
+    assert_eq!(
+        pre.1, post.1,
+        "porcelain status differs after rollback:\n-- pre --\n{}-- post --\n{}",
+        pre.1, post.1
+    );
+    assert_eq!(pre.2, post.2, "file contents differ after rollback");
+    // No orphan stashes.
+    let stash_list = repo.git(&["stash", "list"]);
+    assert!(
+        stash_list.is_empty(),
+        "orphan stash left behind: {stash_list}"
+    );
+}
+
+/// Bug 2: `squire amend HEAD <hunk>` must NOT silently fold pre-existing
+/// staged content that the user did not name into the amended commit.
+/// Unrelated staged content must stay staged; only the named hunks are
+/// folded into HEAD.
+#[test]
+fn amend_head_preserves_unrelated_staged_content() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "a-v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "orig"]);
+
+    // User stages `other.txt` (a new file) as separate work in progress.
+    repo.write_file("other.txt", "other work\n");
+    repo.git(&["add", "other.txt"]);
+    // User also has an unstaged edit to a.txt that they want amended.
+    repo.write_file("a.txt", "a-v2\n");
+
+    let hunks = repo.diff_json();
+    let a_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "a.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    repo.squire(&["amend", a_id]);
+
+    // HEAD should include only a.txt's change, not other.txt.
+    let head_stat = repo.git(&["show", "HEAD", "--stat"]);
+    assert!(
+        head_stat.contains("a.txt"),
+        "a.txt should be in the amended HEAD: {head_stat}"
+    );
+    assert!(
+        !head_stat.contains("other.txt"),
+        "other.txt must NOT be folded into amended HEAD: {head_stat}"
+    );
+    // other.txt must still be staged (not lost, not amended).
+    let status = repo.git(&["status", "--porcelain"]);
+    assert!(
+        status.contains("A  other.txt"),
+        "other.txt should still be staged after amend HEAD: {status}"
+    );
+}
+
+/// Bug 3: `squire drop HEAD <hunk>` must NOT silently fold pre-existing
+/// staged content into the amended commit.
+#[test]
+fn drop_head_preserves_unrelated_staged_content() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+    repo.write_file("a.txt", "v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "change-to-drop"]);
+
+    // User stages separate work `other.txt` as a new file.
+    repo.write_file("other.txt", "other\n");
+    repo.git(&["add", "other.txt"]);
+
+    let hunks = repo.squire(&["--json", "diff", "HEAD~1", "HEAD"]);
+    let parsed: serde_json::Value = serde_json::from_str(&hunks).unwrap();
+    let id = parsed[0]["id"].as_str().unwrap().to_string();
+
+    repo.squire(&["drop", "HEAD", &id]);
+
+    let head_stat = repo.git(&["show", "HEAD", "--stat"]);
+    assert!(
+        !head_stat.contains("other.txt"),
+        "other.txt must NOT be folded into dropped HEAD commit: {head_stat}"
+    );
+    let status = repo.git(&["status", "--porcelain"]);
+    assert!(
+        status.contains("A  other.txt"),
+        "other.txt should still be staged after drop HEAD: {status}"
+    );
+}
+
+/// Bug 4: `squire reword HEAD` must NOT silently fold pre-existing
+/// staged content into the reworded commit. reword is a message-only
+/// operation.
+#[test]
+fn reword_head_preserves_unrelated_staged_content() {
+    let repo = TestRepo::new();
+    repo.write_file("a.txt", "v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "orig"]);
+
+    // User stages separate work.
+    repo.write_file("other.txt", "other\n");
+    repo.git(&["add", "other.txt"]);
+
+    repo.squire(&["reword", "HEAD", "-m", "new msg"]);
+
+    let head_stat = repo.git(&["show", "HEAD", "--stat"]);
+    assert!(
+        !head_stat.contains("other.txt"),
+        "other.txt must NOT be folded into reworded HEAD: {head_stat}"
+    );
+    let head_msg = repo.git(&["log", "-1", "--format=%s"]);
+    assert_eq!(head_msg.trim(), "new msg");
+    let status = repo.git(&["status", "--porcelain"]);
+    assert!(
+        status.contains("A  other.txt"),
+        "other.txt should still be staged after reword: {status}"
+    );
+}
+
+/// Bug 5: `squire revert <staged-hunk>` must not leave the index in a
+/// partial state if the two-step apply fails. When the underlying
+/// `git apply --cached --reverse` succeeds but the working-tree apply
+/// fails, previously the index was mutated and the user had to debug it.
+/// Now the whole operation is rolled back.
+#[test]
+fn revert_staged_hunk_rolls_back_on_worktree_apply_failure() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "A\nB\nC\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "init"]);
+
+    // Stage A -> A2. Then make the working tree also modify C -> C2,
+    // so that reverse-applying the staged hunk against the working
+    // tree context "A2,B,C" fails (the context line C is actually C2).
+    repo.write_file("f.txt", "A2\nB\nC\n");
+    repo.git(&["add", "f.txt"]);
+    repo.write_file("f.txt", "A2\nB\nC2\n");
+
+    let pre = snapshot_state(&repo);
+
+    // Identify the staged hunk id via diff --cached.
+    let staged_out = repo.squire(&["--json", "diff", "--cached"]);
+    let staged: serde_json::Value = serde_json::from_str(&staged_out).unwrap();
+    let id = staged[0]["id"].as_str().unwrap().to_string();
+
+    // Expect failure.
+    let _err = repo.squire_err(&["revert", &id]);
+
+    let post = snapshot_state(&repo);
+    assert_eq!(pre.0, post.0, "HEAD changed");
+    assert_eq!(
+        pre.1, post.1,
+        "porcelain status differs:\n-- pre --\n{}-- post --\n{}",
+        pre.1, post.1
+    );
+    assert_eq!(pre.2, post.2, "file contents differ");
+}
+
+/// Workflow check: alternating "amend hunks into X; amend other hunks
+/// into Y" must work without requiring a clean tree between steps. This
+/// guards against the old `is_clean` check coming back as a reflex.
+#[test]
+fn amend_commit_alternating_workflow() {
+    let repo = TestRepo::new();
+    // base commit so that X-base has a parent for fixup's `~1` lookup.
+    repo.write_file("seed.txt", "seed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "seed"]);
+    repo.write_file("x.txt", "X-v1\n");
+    repo.write_file("y.txt", "Y-v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "X-base"]);
+    let x_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.write_file("z.txt", "Z\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "Y-base"]);
+    let _y_sha = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.write_file("after.txt", "after\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "after-both"]);
+
+    // User has unstaged edits to x.txt (for x) and y.txt (for y).
+    repo.write_file("x.txt", "X-v2\n");
+    repo.write_file("y.txt", "Y-v2\n");
+
+    // Find hunk IDs for each file.
+    let hunks = repo.diff_json();
+    let x_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "x.txt")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Amend x.txt into X-base.
+    repo.squire(&["amend", "--commit", &x_sha[..8], &x_id]);
+
+    // Tree is NOT clean — y.txt is still unstaged. After the first
+    // amend the original y_sha was rewritten; re-resolve via HEAD~1.
+    let new_y_sha = repo.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    assert_ne!(
+        new_y_sha, _y_sha,
+        "first amend should have rewritten Y-base"
+    );
+    let status_after_first = repo.git(&["status", "--porcelain"]);
+    assert!(
+        status_after_first.contains("y.txt"),
+        "y.txt should still be dirty after first amend: {status_after_first}"
+    );
+    let hunks = repo.diff_json();
+    let hunks_str = serde_json::to_string_pretty(&hunks).unwrap();
+    let y_id = hunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["file"].as_str().unwrap() == "y.txt")
+        .unwrap_or_else(|| panic!("y.txt not in diff after first amend.\nstatus: {status_after_first}\nhunks: {hunks_str}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Amend y.txt into the rewritten Y-base. Must NOT reject on
+    // "clean tree" grounds even though x.txt's rewrite just happened.
+    repo.squire(&["amend", "--commit", &new_y_sha[..8], &y_id]);
+
+    // Verify X-base now contains x.txt change, Y-base contains y.txt change.
+    let x_show = repo.git(&["show", "HEAD~2"]);
+    assert!(x_show.contains("X-v2"), "X amend should be in HEAD~2");
+    let y_show = repo.git(&["show", "HEAD~1"]);
+    assert!(y_show.contains("Y-v2"), "Y amend should be in HEAD~1");
+}
+
+/// reword of a non-HEAD commit must not require a clean tree; the user
+/// workflow "reword an old commit while keeping other in-progress edits"
+/// must work.
+#[test]
+fn reword_non_head_allows_dirty_tree() {
+    let repo = TestRepo::new();
+    // Seed commit so target has a parent for the rebase `~1` lookup.
+    repo.write_file("seed.txt", "seed\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "seed"]);
+    repo.write_file("f.txt", "v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "old msg"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.write_file("g.txt", "g\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "second"]);
+
+    // Dirty state unrelated to target.
+    repo.write_file("scratch.txt", "scratch\n");
+    repo.git(&["add", "scratch.txt"]);
+    repo.write_file("untracked.txt", "u\n");
+
+    let pre_status = repo.git(&["status", "--porcelain"]);
+
+    repo.squire(&["reword", &target[..8], "-m", "reworded"]);
+
+    // target's message changed.
+    let log = repo.git(&["log", "--format=%s", "-1", "HEAD~1"]);
+    assert_eq!(log.trim(), "reworded");
+    // Dirty state preserved.
+    let post_status = repo.git(&["status", "--porcelain"]);
+    assert_eq!(
+        pre_status, post_status,
+        "unrelated dirty state must survive non-HEAD reword"
+    );
+}
+
+/// drop of a non-HEAD commit must not require a clean tree.
+#[test]
+fn drop_non_head_allows_dirty_tree() {
+    let repo = TestRepo::new();
+    repo.write_file("f.txt", "v1\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "base"]);
+    repo.write_file("f.txt", "v2\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "drop-me"]);
+    let target = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.write_file("g.txt", "g\n");
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-m", "after"]);
+
+    // Dirty state.
+    repo.write_file("scratch.txt", "scratch\n");
+    repo.git(&["add", "scratch.txt"]);
+
+    // Hunk id from the target commit.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&repo.squire(&["--json", "diff", "HEAD~2", "HEAD~1"])).unwrap();
+    let id = parsed[0]["id"].as_str().unwrap().to_string();
+
+    repo.squire(&["drop", &target[..8], &id]);
+
+    // scratch.txt should still be staged.
+    let status = repo.git(&["status", "--porcelain"]);
+    assert!(
+        status.contains("A  scratch.txt"),
+        "scratch should still be staged: {status}"
+    );
 }

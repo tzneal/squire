@@ -415,6 +415,12 @@ pub fn reset_mixed(dir: &Path, rev: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Mixed reset to HEAD (unstage everything without touching worktree).
+pub fn reset_mixed_head(dir: &Path) -> Result<(), String> {
+    git_cmd(dir, "reset", &["HEAD".to_string()])?;
+    Ok(())
+}
+
 /// Reset working tree to match HEAD (checkout all files).
 pub fn checkout_head(dir: &Path) -> Result<(), String> {
     git_cmd(
@@ -632,8 +638,192 @@ pub fn stash_push(dir: &Path, message: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn stash_pop(dir: &Path) -> Result<(), String> {
-    git_cmd(dir, "stash", &["pop".to_string()]).map(|_| ())
+/// Run `git clean -fd` to remove untracked files and directories.
+/// Used during state restoration — after `reset --hard`, untracked files
+/// still remain, and must be cleared before re-applying a snapshot that
+/// may contain the same paths as tracked content.
+pub fn clean_fd(dir: &Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["clean", "-fd"])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to run git clean: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git clean failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Apply a stash commit onto the current working state, preserving the
+/// index/worktree partition (via `--index`). Used to overlay a captured
+/// [`capture_snapshot`] onto a repo in the same HEAD state (rollback).
+pub fn stash_apply_index(dir: &Path, stash_sha: &str) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["stash", "apply", "--index", stash_sha])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to run git stash apply: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git stash apply failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Check if a file path exists in the current index.
+pub fn file_in_index(dir: &Path, path: &str) -> bool {
+    Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", path])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Apply a patch tolerating hunks already present via `--3way`.
+pub fn apply_patch_tolerant(dir: &Path, patch: &str, extra_args: &[&str]) -> Result<(), String> {
+    // --3way: three-way merge per hunk, dropping hunks already in HEAD.
+    // Without it, apply fails on any duplicate content.
+    let mut args: Vec<&str> = vec!["--3way"];
+    args.extend_from_slice(extra_args);
+    let mut child = Command::new("git")
+        .arg("apply")
+        .args(&args)
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run git apply: {e}"))?;
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(patch.as_bytes())
+            .map_err(|e| format!("failed to write patch to git apply: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for git apply: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Filter out the noise git prints when --3way drops hunks
+        // that are already present.
+        if !stderr.contains("error:") && !stderr.contains("fatal:") {
+            return Ok(());
+        }
+        return Err(format!("git apply failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Capture the repo's tracked working state (index + worktree, NOT
+/// untracked files) into a stash commit and return its sha. Returns
+/// `Ok(None)` if the tracked tree is clean.
+///
+/// Untracked files are captured separately via [`list_untracked`] so
+/// they can be restored byte-for-byte on rollback without running into
+/// git's safety checks against overwriting tracked files. (If the same
+/// path is both in the snapshot as untracked and tracked in the current
+/// HEAD, `stash apply --index` with `-u` fails.)
+///
+/// Uses `git stash create`, which only records tracked changes and
+/// does not modify the stash list. The returned commit sha remains
+/// reachable in git's object db (git's gc grace period is long enough
+/// — default 14 days — that this is safe for the lifetime of a squire
+/// invocation).
+///
+/// Pair with [`restore_snapshot`] to roll back.
+pub fn capture_snapshot(dir: &Path) -> Result<Option<String>, String> {
+    let output = Command::new("git")
+        .args(["stash", "create", "--message", "squire-atomic-snapshot"])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to run git stash create: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git stash create failed: {stderr}"));
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Empty output means the tracked tree was clean.
+    if sha.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(sha))
+    }
+}
+
+/// List untracked files (excluding ignored), each with its absolute
+/// path relative to the repo toplevel. Used to capture state that
+/// `git stash create` does not.
+pub fn list_untracked_with_contents(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let files = list_untracked(dir)?;
+    let root = PathBuf::from(toplevel(dir)?);
+    let mut out = Vec::new();
+    for f in files {
+        let path = root.join(&f);
+        let content =
+            std::fs::read(&path).map_err(|e| format!("failed to read untracked file {f}: {e}"))?;
+        out.push((f, content));
+    }
+    Ok(out)
+}
+
+/// Restore the repo to a previously captured snapshot. Performs:
+///   1. `git reset --hard <head>` — restores HEAD and tracked files
+///   2. `git clean -fd` — removes any untracked files/dirs introduced
+///      between capture and now
+///   3. `git stash apply --index <snapshot>` — re-applies captured
+///      tracked index + worktree state (if snapshot is Some)
+///   4. Write each captured untracked file back to disk (but only if
+///      the path is not now tracked — otherwise we'd clobber tracked
+///      content or trigger git's safety checks).
+///
+/// Best-effort on individual restore failures: rollback is already in
+/// a failure path and the caller wants the ORIGINAL error surfaced.
+pub fn restore_snapshot(
+    dir: &Path,
+    head: &str,
+    snapshot: Option<&str>,
+    untracked: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    reset_hard(dir, head)?;
+    clean_fd(dir)?;
+    if let Some(sha) = snapshot {
+        stash_apply_index(dir, sha)?;
+    }
+    restore_untracked(dir, untracked)?;
+    Ok(())
+}
+
+/// Write the given untracked files back to disk. Skips paths that are
+/// now tracked in HEAD (to avoid clobbering tracked content during
+/// restoration onto a different HEAD). If the file already exists with
+/// identical content, it's a no-op.
+pub fn restore_untracked(dir: &Path, untracked: &[(String, Vec<u8>)]) -> Result<(), String> {
+    if untracked.is_empty() {
+        return Ok(());
+    }
+    let root = PathBuf::from(toplevel(dir)?);
+    for (rel, content) in untracked {
+        let path = root.join(rel);
+        // Skip if now tracked at the same path.
+        if file_in_index(dir, rel) {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, content)
+            .map_err(|e| format!("failed to restore untracked file {rel}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Apply a patch forward (not reversed) to the working tree.

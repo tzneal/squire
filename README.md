@@ -89,8 +89,9 @@ squire drop HEAD~2 abc12345 def67890           # drop hunks from older commit
 
 Inverse of `amend`: removes specific hunks from an existing commit.
 Find hunk IDs with `squire diff <commit>~1 <commit>` or
-`squire log --json`. Requires a clean working tree for non-HEAD
-targets.
+`squire log --json`.
+
+Any unstaged or staged changes are preserved across the operation.
 
 ### Commit and amend
 
@@ -224,7 +225,7 @@ squire squash -m "combined" abc1234 def5678  # squash with new message
 Folds one or more source commits into a target commit. The first
 argument is the target (survives), the rest are folded in. The
 target's message is kept by default; use `-m` to replace it.
-Requires a clean working tree.
+Any unstaged or staged changes are preserved across the operation.
 
 ## Stash specific hunks
 
@@ -296,10 +297,10 @@ All rebase-based commands (`amend --commit`, `drop`, `reword`, `squash`,
 `split`) are **atomic by default**: if the rebase would leave a conflict,
 squire aborts the rebase, rolls back any intermediate commits it created
 (e.g. the `fixup!` commit `amend` creates), and resets HEAD to where it
-was before the command ran. Any dirty working tree that was stashed on
-entry is restored. You get a structured error naming the conflicting
-file(s) with `rolled_back: true`, but no half-finished rebase to clean
-up.
+was before the command ran. The full pre-command state — HEAD, index,
+working tree, and untracked files — is restored exactly. You get a
+structured error naming the conflicting file(s) with `rolled_back: true`,
+but no half-finished rebase to clean up.
 
 Use `--pause-on-conflict` to opt out of rollback. On conflict, the rebase
 is left paused so you can resolve the conflict by hand with `git add` +
