@@ -1,5 +1,4 @@
-mod helpers;
-use helpers::TestRepo;
+use crate::helpers::TestRepo;
 
 #[test]
 fn status_shows_staged_and_unstaged() {

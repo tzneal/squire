@@ -1,5 +1,4 @@
-mod helpers;
-use helpers::TestRepo;
+use crate::helpers::TestRepo;
 
 // Regression test: `squire amend --commit <sha>` used to accept any SHA
 // that `git rev-parse` could resolve (including commits that were rewritten

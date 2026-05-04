@@ -1,12 +1,17 @@
 [package]
 publish = false
 name = "squire"
+autotests = false
 
 version = "0.2.2"
 edition = "2024"
 description = "Non-interactive, hunk-addressable git staging CLI for LLMs"
 repository = "https://github.com/tzneal/squire"
 license = "MIT"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [package.metadata.dist]
 dist = true
