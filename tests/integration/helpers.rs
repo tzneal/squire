@@ -69,7 +69,6 @@ impl TestRepo {
     }
 
     /// Run squire expecting failure, return the error message.
-    // #[rustllmlint::allow(dead_public)]
     pub fn squire_err(&self, args: &[&str]) -> String {
         let (_, result) = self.run_squire(args);
         match result {
@@ -79,14 +78,12 @@ impl TestRepo {
     }
 
     /// Run squire expecting failure with --json, return stdout (JSON error).
-    // #[rustllmlint::allow(dead_public)]
     pub fn squire_json_err(&self, args: &[&str]) -> String {
         let (stdout, result) = self.run_squire(args);
         assert!(result.is_err(), "squire {:?} should have failed", args);
         stdout
     }
 
-    // #[rustllmlint::allow(dead_public)]
     pub fn write_file(&self, name: &str, content: &str) {
         let path = self.dir.path().join(name);
         if let Some(parent) = path.parent() {
@@ -100,14 +97,12 @@ impl TestRepo {
     }
 
     /// Run `squire --json diff`, parse the JSON, and return it.
-    // #[rustllmlint::allow(dead_public)]
     pub fn diff_json(&self) -> serde_json::Value {
         let out = self.squire(&["--json", "diff"]);
         serde_json::from_str(&out).unwrap()
     }
 
     /// Create a repo with a single committed file, then overwrite it with new content.
-    // #[rustllmlint::allow(dead_public)]
     pub fn with_committed_file(name: &str, old: &str, new: &str) -> Self {
         let repo = Self::new();
         repo.write_file(name, old);
@@ -118,7 +113,6 @@ impl TestRepo {
     }
 
     /// Create a repo with two committed files, then overwrite both with new content.
-    // #[rustllmlint::allow(dead_public)]
     pub fn with_two_committed_files(
         a_name: &str,
         a_old: &str,
@@ -146,7 +140,6 @@ impl TestRepo {
     /// on top of another branch. After this returns, `.git/rebase-merge/`
     /// exists and `f.txt` has conflict markers. Callers should run
     /// `git rebase --abort` to clean up (or rely on TestRepo's tempdir drop).
-    // #[rustllmlint::allow(dead_public)]
     pub fn with_rebase_conflict() -> Self {
         let repo = Self::new();
         repo.write_file("f.txt", "base\n");

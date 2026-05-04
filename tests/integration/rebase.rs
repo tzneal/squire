@@ -1,5 +1,4 @@
-mod helpers;
-use helpers::TestRepo;
+use crate::helpers::TestRepo;
 
 #[test]
 fn rebase_no_upstream_returns_error() {

@@ -1,5 +1,4 @@
-mod helpers;
-use helpers::TestRepo;
+use crate::helpers::TestRepo;
 
 #[test]
 fn seqedit_changes_action_in_todo_file() {

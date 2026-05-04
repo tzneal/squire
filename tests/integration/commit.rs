@@ -1,5 +1,4 @@
-mod helpers;
-use helpers::TestRepo;
+use crate::helpers::TestRepo;
 
 // --- commit command ---
 
