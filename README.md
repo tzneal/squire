@@ -9,7 +9,8 @@ exposes the same hunk-level staging through single commands with
 structured arguments, so an LLM (or script) can selectively stage,
 unstage, revert, and show hunks without any interactive prompts. It also
 provides branch cleanup analysis to identify merged, squash-merged,
-and stale branches.
+and stale branches, and a contextualized rebase playbook that guides
+an LLM through rebases and conflict resolution.
 
 Every hunk gets a short, stable, content-based ID (first 8 hex chars
 of the hunk content's SHA-256 hash). Each line within a hunk also gets
@@ -24,6 +25,14 @@ cargo install --path .
 ```
 
 Requires Rust 1.85+ and `git` on your PATH.
+
+### Kiro CLI setup
+
+Generate a steering file so the Kiro CLI knows how to use squire:
+
+```bash
+squire --llm-help > ~/.kiro/steering/squire.md
+```
 
 ## Usage
 
